@@ -1,0 +1,26 @@
+[Unit]
+Description=NexBreak processing channel %i (ingest + SCTE splice + captioning)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/opt/nexbreak/bin/nexbreak-proc --service-name %i --db /var/lib/nexbreak/nexbreak.sqlite
+Restart=on-failure
+RestartSec=2
+User=nexbreak
+Group=nexbreak
+
+# Each instance (nexbreak-proc@1, @2, @3, @4) is its own process group.
+# A crash or manual restart of one instance never touches the others,
+# and never touches any nexbreak-egress@ instance.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nexbreak /var/log/nexbreak
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

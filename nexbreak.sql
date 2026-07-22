@@ -1,0 +1,133 @@
+-- NexBreak core schema (SQLite)
+-- One row per physical input in processing_channels, one row per physical
+-- output in egress_channels. routing_assignments is the decoupling layer
+-- that lets any processing feed be assigned to any egress adapter.
+
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE processing_channels (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                    TEXT NOT NULL,
+    service_name            TEXT NOT NULL UNIQUE,     -- systemd instance id, e.g. 'proc1'
+
+    input_type              TEXT NOT NULL CHECK (input_type IN ('rtsp','srt','decklink')),
+
+    -- SRT input settings (input_type = 'srt')
+    srt_mode                TEXT CHECK (srt_mode IN ('caller','listener','rendezvous')),
+    srt_remote_host         TEXT,
+    srt_remote_port         INTEGER,
+    srt_listen_port         INTEGER,
+
+    -- RTSP input settings (input_type = 'rtsp')
+    rtsp_role               TEXT CHECK (rtsp_role IN ('client_pull','server_push')),
+    rtsp_url                TEXT,
+
+    -- DeckLink input settings (input_type = 'decklink')
+    decklink_device_index   INTEGER,
+
+    -- Normalization / encode target
+    video_codec             TEXT,
+    audio_codec             TEXT,
+    target_bitrate_kbps     INTEGER,
+
+    -- Splice behavior
+    splice_insertion_delay_ms INTEGER NOT NULL DEFAULT 0,
+
+    -- Captioning
+    captioning_enabled      BOOLEAN NOT NULL DEFAULT 0,
+
+    -- Addressable local output the router reads from
+    local_feed_host         TEXT NOT NULL DEFAULT '127.0.0.1',
+    local_feed_port         INTEGER NOT NULL,
+
+    enabled                 BOOLEAN NOT NULL DEFAULT 1,
+    created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE egress_channels (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                    TEXT NOT NULL,
+    service_name            TEXT NOT NULL UNIQUE,     -- systemd instance id, e.g. 'egress1'
+
+    output_type             TEXT NOT NULL CHECK (output_type IN ('srt','hls')),
+
+    -- SRT output settings (output_type = 'srt')
+    srt_mode                TEXT CHECK (srt_mode IN ('caller','listener','rendezvous')),
+    srt_remote_host         TEXT,
+    srt_remote_port         INTEGER,
+    srt_listen_port         INTEGER,
+
+    -- HLS output settings (output_type = 'hls')
+    hls_mode                TEXT CHECK (hls_mode IN ('origin_pull','push_put')),
+    hls_push_url            TEXT,
+
+    target_bitrate_kbps     INTEGER,
+
+    enabled                 BOOLEAN NOT NULL DEFAULT 1,
+    created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Each egress adapter has exactly one active source; a processing feed may
+-- be assigned to more than one egress adapter (simulcast), so the unique
+-- constraint lives on egress_channel_id only.
+CREATE TABLE routing_assignments (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    processing_channel_id   INTEGER NOT NULL REFERENCES processing_channels(id) ON DELETE CASCADE,
+    egress_channel_id       INTEGER NOT NULL UNIQUE REFERENCES egress_channels(id) ON DELETE CASCADE,
+    assigned_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE control_credentials (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    label                   TEXT NOT NULL,             -- e.g. 'DNF panel - MCR', 'Streamdeck - Bay 2'
+    key_hash                TEXT NOT NULL,
+    created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_used_at            TIMESTAMP,
+    revoked                 BOOLEAN NOT NULL DEFAULT 0
+);
+
+CREATE TABLE audit_events (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    processing_channel_id   INTEGER REFERENCES processing_channels(id) ON DELETE SET NULL,
+    egress_channel_id       INTEGER REFERENCES egress_channels(id) ON DELETE SET NULL,
+
+    event_type              TEXT NOT NULL CHECK (event_type IN (
+                                'splice_command','service_start','service_stop',
+                                'service_crash','config_change','routing_change'
+                            )),
+
+    -- Populated for event_type = 'splice_command'
+    splice_type             TEXT CHECK (splice_type IN (
+                                'splice_start_immediate','splice_start_normal',
+                                'splice_end_immediate','splice_end_normal',
+                                'splice_cancel'
+                            )),
+    splice_hex_payload      TEXT,
+    thumbnail_path          TEXT,
+
+    triggered_by_credential_id INTEGER REFERENCES control_credentials(id),
+    source_ip               TEXT,
+    result                   TEXT NOT NULL CHECK (result IN ('success','failure')),
+    detail                   TEXT,
+
+    occurred_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_audit_events_channel ON audit_events(processing_channel_id, occurred_at);
+CREATE INDEX idx_audit_events_type ON audit_events(event_type, occurred_at);
+
+-- Shared across all channels, per project decision
+CREATE TABLE caption_lexicon (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    word                    TEXT NOT NULL UNIQUE,
+    phonetic                TEXT NOT NULL,             -- pronunciation entry for the ASR lexicon
+    created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE caption_blacklist (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    word                    TEXT NOT NULL UNIQUE,
+    created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

@@ -1,0 +1,26 @@
+[Unit]
+Description=NexBreak egress channel %i (packaging + delivery)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/opt/nexbreak/bin/nexbreak-egress --service-name %i --db /var/lib/nexbreak/nexbreak.sqlite
+Restart=on-failure
+RestartSec=2
+User=nexbreak
+Group=nexbreak
+
+# Same isolation model as nexbreak-proc@ — reads whatever local feed the
+# router currently assigns it. Restarting an egress instance to change its
+# destination does not touch the processing service producing its feed.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nexbreak /var/log/nexbreak
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
