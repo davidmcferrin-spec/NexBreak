@@ -21,6 +21,50 @@ Env overrides: NEXBREAK_PREFIX NEXBREAK_DATA NEXBREAK_LOG
 EOF
 }
 
+install_tsduck() {
+  # Not in Ubuntu's default apt repos — use official .deb from GitHub releases.
+  if command -v tsp >/dev/null 2>&1; then
+    echo "TSDuck already present: $(command -v tsp)"
+    return 0
+  fi
+  if apt-get install -y tsduck 2>/dev/null; then
+    return 0
+  fi
+
+  local ver="${TSDUCK_VERSION:-v3.44-4676}"
+  local pkg_ver="${ver#v}"
+  local deb_arch
+  case "$(dpkg --print-architecture)" in
+    amd64) deb_arch=amd64 ;;
+    arm64) deb_arch=arm64 ;;
+    *)
+      echo "ERROR: unsupported arch for TSDuck auto-install; get a .deb from https://tsduck.io/tsduck-binaries/" >&2
+      return 1
+      ;;
+  esac
+  # Match host Ubuntu major (24/26); fall back to ubuntu24 packages.
+  local ubu
+  ubu="$(. /etc/os-release && echo "${VERSION_ID%%.*}")"
+  case "$ubu" in
+    24|26) ;;
+    *) ubu=24 ;;
+  esac
+  local deb="tsduck_${pkg_ver}.ubuntu${ubu}_${deb_arch}.deb"
+  local url="https://github.com/tsduck/tsduck/releases/download/${ver}/${deb}"
+  local tmp="/tmp/${deb}"
+
+  echo "TSDuck not in apt — downloading ${deb}…"
+  curl -fsSL -o "$tmp" "$url"
+  apt-get install -y "$tmp"
+  rm -f "$tmp"
+
+  if ! command -v tsp >/dev/null 2>&1; then
+    echo "ERROR: tsp still missing after TSDuck install" >&2
+    return 1
+  fi
+  echo "Installed TSDuck: $(tsp --version 2>&1 | head -n1 || true)"
+}
+
 cmd_deps() {
   apt-get update
   apt-get install -y \
@@ -29,10 +73,7 @@ cmd_deps() {
     python3 \
     curl \
     rsync
-  # TSDuck: prefer distro package; fall back to note if missing
-  if ! apt-get install -y tsduck; then
-    echo "WARN: tsduck package not in apt — install from https://tsduck.io/download/" >&2
-  fi
+  install_tsduck
   # MediaMTX binary (WebRTC WHEP preview)
   if [[ ! -x /usr/local/bin/mediamtx ]]; then
     local ver="${MEDIAMTX_VERSION:-v1.12.2}"
