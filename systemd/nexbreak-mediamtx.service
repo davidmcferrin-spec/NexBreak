@@ -1,0 +1,22 @@
+[Unit]
+Description=NexBreak MediaMTX (WebRTC WHEP preview)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mediamtx /etc/nexbreak/mediamtx.yml
+Restart=on-failure
+RestartSec=2
+User=nexbreak
+Group=nexbreak
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+# Config + optional TLS material
+ReadOnlyPaths=/etc/nexbreak
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

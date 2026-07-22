@@ -26,6 +26,7 @@ from nexbreak_db import (  # noqa: E402
     control_sock_path,
     init_schema,
     migrate,
+    preview_path_for,
     row_to_dict,
     rows_to_dicts,
 )
@@ -34,6 +35,8 @@ from nexbreak_control import send_splice  # noqa: E402
 
 log = logging.getLogger("nexbreak-controller")
 DB_PATH: Optional[str] = None
+WHEP_PORT = int(os.environ.get("NEXBREAK_WHEP_PORT", "8889"))
+MEDIAMTX_API = os.environ.get("NEXBREAK_MEDIAMTX_API", "http://127.0.0.1:9997")
 
 
 def db():
@@ -218,6 +221,44 @@ class Handler(BaseHTTPRequestHandler):
                             "splice_events": splices,
                         },
                         "recent": rows_to_dicts(recent),
+                        "preview": {
+                            "whep_port": WHEP_PORT,
+                            "mediamtx_api": MEDIAMTX_API,
+                        },
+                    },
+                )
+                return
+
+            if path == "/v1/preview":
+                rows = conn.execute(
+                    "SELECT * FROM processing_channels WHERE enabled = 1 ORDER BY id"
+                ).fetchall()
+                channels = []
+                for r in rows:
+                    ch = row_to_dict(r)
+                    assert ch is not None
+                    enabled = int(
+                        ch.get("preview_enabled")
+                        if ch.get("preview_enabled") is not None
+                        else 1
+                    )
+                    channels.append(
+                        {
+                            "id": ch["id"],
+                            "name": ch["name"],
+                            "service_name": ch["service_name"],
+                            "preview_enabled": enabled,
+                            "preview_path": preview_path_for(ch),
+                            "input_type": ch["input_type"],
+                            "rtsp_url": ch.get("rtsp_url"),
+                        }
+                    )
+                self._send(
+                    200,
+                    {
+                        "ok": True,
+                        "whep_port": WHEP_PORT,
+                        "channels": channels,
                     },
                 )
                 return
@@ -380,12 +421,18 @@ class Handler(BaseHTTPRequestHandler):
                     "srt_listen_port",
                     "rtsp_role",
                     "rtsp_url",
+                    "rtsp_transport",
                     "decklink_device_index",
                     "video_codec",
                     "audio_codec",
                     "target_bitrate_kbps",
+                    "ingest_mode",
                     "splice_insertion_delay_ms",
+                    "scte35_pid",
+                    "splice_udp_port",
                     "captioning_enabled",
+                    "preview_enabled",
+                    "preview_path",
                     "local_feed_host",
                     "local_feed_port",
                     "enabled",

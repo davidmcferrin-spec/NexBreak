@@ -1,13 +1,24 @@
 "use strict";
 (function () {
   var api = window.NexBreakAPI;
+  var whep = window.NexBreakWHEP;
   var grid = document.getElementById("roll-grid");
+  var players = [];
 
   var SPLICE_TYPES = [
     { value: "splice_start_immediate", label: "ROLL" },
     { value: "splice_end_immediate", label: "END" },
     { value: "splice_cancel", label: "CANCEL" },
   ];
+
+  function teardown() {
+    players.forEach(function (p) {
+      try {
+        p.disconnect();
+      } catch (e) {}
+    });
+    players = [];
+  }
 
   async function fire(channelId, spliceType, btn) {
     btn.disabled = true;
@@ -21,7 +32,10 @@
         return;
       }
       api.toast(
-        "Queued · delay " + (res.data.delay_ms || 0) + " ms · audit #" + res.data.audit_id,
+        "Injected · delay " +
+          (res.data.delay_ms || 0) +
+          " ms · audit #" +
+          res.data.audit_id,
         "success"
       );
     } catch (err) {
@@ -32,20 +46,37 @@
   }
 
   async function load() {
-    var res = await api.get("/v1/processing");
-    if (!res.ok || !res.data) {
+    teardown();
+    var [proc, preview] = await Promise.all([
+      api.get("/v1/processing"),
+      api.get("/v1/preview"),
+    ]);
+    if (!proc.ok || !proc.data) {
       grid.innerHTML = '<div class="empty">Controller unreachable</div>';
       return;
     }
-    var channels = (res.data.channels || []).filter(function (c) {
+
+    var whepPort =
+      (preview.data && preview.data.whep_port) || window.NEXBREAK_WHEP_PORT || 8889;
+    var pathById = {};
+    ((preview.data && preview.data.channels) || []).forEach(function (c) {
+      pathById[c.id] = c;
+    });
+
+    var channels = (proc.data.channels || []).filter(function (c) {
       return Number(c.enabled) === 1;
     });
     if (!channels.length) {
       grid.innerHTML = '<div class="empty">No enabled processing channels</div>';
       return;
     }
+
     grid.innerHTML = "";
     channels.forEach(function (ch) {
+      var meta = pathById[ch.id] || {};
+      var path = meta.preview_path || "nb" + ch.service_name;
+      var previewOn = meta.preview_enabled == null || Number(meta.preview_enabled) === 1;
+
       var card = document.createElement("div");
       card.className = "channel-card";
       card.innerHTML =
@@ -54,12 +85,34 @@
         '</strong><span class="badge dim">' +
         api.esc(ch.input_type) +
         "</span></div>" +
-        '<div class="preview-slot">WebRTC preview — next</div>' +
+        '<div class="preview-slot">' +
+        (previewOn
+          ? '<video playsinline autoplay muted></video><div class="preview-state muted">idle</div>'
+          : '<div class="muted">Preview off</div>') +
+        "</div>" +
         '<div class="muted">Delay ' +
         api.esc(String(ch.splice_insertion_delay_ms)) +
-        " ms · feed :" +
-        api.esc(String(ch.local_feed_port)) +
+        " ms · " +
+        api.esc(path) +
         '</div><div class="bar"></div>';
+
+      if (previewOn) {
+        var video = card.querySelector("video");
+        var stateEl = card.querySelector(".preview-state");
+        var player = whep.create(video, {
+          path: path,
+          whepPort: whepPort,
+          onState: function (s) {
+            stateEl.textContent = s.message;
+            stateEl.className =
+              "preview-state " +
+              (s.kind === "ok" ? "ok" : s.kind === "bad" ? "bad" : "muted");
+          },
+        });
+        players.push(player);
+        player.connect();
+      }
+
       var bar = card.querySelector(".bar");
       SPLICE_TYPES.forEach(function (t) {
         var b = document.createElement("button");
@@ -76,5 +129,6 @@
     });
   }
 
+  window.addEventListener("beforeunload", teardown);
   load();
 })();

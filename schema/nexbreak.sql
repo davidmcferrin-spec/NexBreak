@@ -21,6 +21,9 @@ CREATE TABLE processing_channels (
     -- RTSP input settings (input_type = 'rtsp')
     rtsp_role               TEXT CHECK (rtsp_role IN ('client_pull','server_push')),
     rtsp_url                TEXT,
+    -- tcp (default) or udp for ffmpeg -rtsp_transport
+    rtsp_transport          TEXT NOT NULL DEFAULT 'tcp'
+                            CHECK (rtsp_transport IN ('tcp','udp')),
 
     -- DeckLink input settings (input_type = 'decklink')
     decklink_device_index   INTEGER,
@@ -42,6 +45,10 @@ CREATE TABLE processing_channels (
 
     -- Captioning
     captioning_enabled      BOOLEAN NOT NULL DEFAULT 0,
+
+    -- WebRTC preview (MediaMTX path name, e.g. nb1). NULL = 'nb' || service_name
+    preview_enabled         BOOLEAN NOT NULL DEFAULT 1,
+    preview_path            TEXT,
 
     -- Addressable local output the router reads from
     local_feed_host         TEXT NOT NULL DEFAULT '127.0.0.1',

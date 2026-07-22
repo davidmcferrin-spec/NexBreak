@@ -81,6 +81,7 @@ def build_input_url(channel: dict[str, Any]) -> str:
 def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
     """
     ffmpeg argv that writes MPEG-TS to stdout (piped into tsp).
+    RTSP client_pull uses low-latency live flags; transport from rtsp_transport.
     """
     url = build_input_url(channel)
     kind = channel["input_type"]
@@ -90,13 +91,29 @@ def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
     argv = [ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostdin"]
 
     if kind == "rtsp":
-        argv += ["-rtsp_transport", "tcp", "-i", url]
+        transport = (channel.get("rtsp_transport") or "tcp").lower()
+        if transport not in ("tcp", "udp"):
+            transport = "tcp"
+        # Live RTSP pull: prefer TCP, short probe, reconnect-friendly timeouts.
+        argv += [
+            "-rtsp_transport", transport,
+            "-fflags", "nobuffer+genpts+discardcorrupt",
+            "-flags", "low_delay",
+            "-probesize", "32",
+            "-analyzeduration", "0",
+            "-timeout", "5000000",
+            "-i", url,
+        ]
     elif kind == "decklink":
-        # Device string is "decklink=device=N" — split for ffmpeg's -f decklink
         device = str(int(channel["decklink_device_index"]))
         argv += ["-f", "decklink", "-i", device]
     else:
-        argv += ["-i", url]
+        # SRT (and anything else ffmpeg understands as a URL)
+        argv += [
+            "-fflags", "nobuffer+genpts+discardcorrupt",
+            "-flags", "low_delay",
+            "-i", url,
+        ]
 
     if mode == "transcode":
         vcodec = (channel.get("video_codec") or "h264").lower()
@@ -106,6 +123,7 @@ def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
         argv += [
             "-c:v", v_ffmpeg,
             "-preset", "veryfast",
+            "-tune", "zerolatency",
             "-b:v", f"{bitrate}k",
             "-g", "60",
             "-c:a", a_ffmpeg,
@@ -119,6 +137,41 @@ def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
     # MPEG-TS on stdout for tsp -I file -
     argv += ["-f", "mpegts", "-mpegts_flags", "+resend_headers", "pipe:1"]
     return argv
+
+
+def ffmpeg_preview_argv(
+    *,
+    ffmpeg: str,
+    feed_host: str,
+    feed_port: int,
+    preview_path: str,
+    mediamtx_rtsp: Optional[str] = None,
+) -> list[str]:
+    """
+    Republish the local MPEG-TS UDP feed to MediaMTX over RTSP (loopback).
+    Video copy; audio → Opus for browser WebRTC friendliness.
+    """
+    base = (mediamtx_rtsp or os.environ.get("NEXBREAK_MEDIAMTX_RTSP") or "rtsp://127.0.0.1:8554").rstrip("/")
+    dst = f"{base}/{preview_path}"
+    src = f"udp://{feed_host}:{int(feed_port)}?reuse=1&fifo_size=1000000&overrun_nonfatal=1"
+    return [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel", "warning",
+        "-nostdin",
+        "-fflags", "+genpts",
+        "-i", src,
+        "-map", "0:v:0?",
+        "-map", "0:a:0?",
+        "-c:v", "copy",
+        "-c:a", "libopus",
+        "-b:a", "64k",
+        "-ac", "2",
+        "-ar", "48000",
+        "-f", "rtsp",
+        "-rtsp_transport", "tcp",
+        dst,
+    ]
 
 
 def tsp_splice_argv(

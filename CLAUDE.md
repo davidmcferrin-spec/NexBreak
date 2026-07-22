@@ -148,16 +148,19 @@ preview layered in after the core signal path is proven.
 ### Scaffold progress (2026-07-22)
 
 Done:
-- `schema/nexbreak.sql` + migrations (`scte35_pid`, `splice_udp_port`, `ingest_mode`)
-- systemd units + `scripts/install-ubuntu.sh` + Apache vhost
+- `schema/nexbreak.sql` + migrations (`scte35_pid`, `splice_udp_port`, `ingest_mode`,
+  `rtsp_transport`, `preview_enabled`, `preview_path`)
+- systemd units + `scripts/install-ubuntu.sh` + Apache vhost + MediaMTX
 - `nexbreak-controller` REST API; splice fan-out via `/run/nexbreak/proc-*.sock`
-- `nexbreak-proc`: ffmpeg → tsp (PMT + spliceinject) → UDP local feed
+- `nexbreak-proc`: ffmpeg RTSP/SRT ingest → tsp spliceinject → UDP feed
+  + MediaMTX RTSP preview publisher (WHEP)
 - `nexbreak-egress`: UDP local feed → SRT (ffmpeg)
-- `web/` UI (Apache DocumentRoot); `/api` PHP proxy to controller
+- `web/` UI: Dashboard, Roll (with live preview), Preview, Channels, Router,
+  Captions, Audit; `/api` PHP proxy to controller
 
 Next:
 - Hardware bring-up of channel 1 against a real RTSP source
-- WebRTC preview (NexVUE/MediaMTX patterns)
 - Privileged helper for systemctl (leaning Unix-socket helper over sudoers)
 - Caption ASR (Vosk) using splice pre-roll as headroom
 - HLS egress mode
+- TLS on MediaMTX when UI is HTTPS (same NexVUE pattern)

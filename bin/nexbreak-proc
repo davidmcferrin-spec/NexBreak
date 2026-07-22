@@ -39,10 +39,12 @@ from nexbreak_db import (  # noqa: E402
     control_sock_path,
     get_processing_by_service,
     migrate,
+    preview_path_for,
     splice_udp_port_for,
 )
 from nexbreak_pipeline import (  # noqa: E402
     ffmpeg_ingest_argv,
+    ffmpeg_preview_argv,
     hex_to_bytes,
     require_bins,
     scte35_xml,
@@ -54,7 +56,10 @@ _stop = False
 _event_id = 1
 _channel: dict[str, Any] = {}
 _splice_udp = 0
-_procs: list[Popen] = []
+_procs: list[Popen] = []          # [ffmpeg_ingest, tsp, ...]
+_preview: Optional[Popen] = None  # non-fatal sidecar
+_preview_argv: list[str] = []
+_preview_restart_at = 0.0
 
 
 def _handle_signal(signum, _frame):
@@ -64,11 +69,16 @@ def _handle_signal(signum, _frame):
 
 
 def _kill_pipeline() -> None:
+    global _preview
     for p in reversed(_procs):
         if p.poll() is None:
             p.terminate()
+    if _preview is not None and _preview.poll() is None:
+        _preview.terminate()
     deadline = time.time() + 5
-    for p in reversed(_procs):
+    for p in list(reversed(_procs)) + ([_preview] if _preview else []):
+        if p is None:
+            continue
         if p.poll() is None:
             remaining = max(0.1, deadline - time.time())
             try:
@@ -76,7 +86,41 @@ def _kill_pipeline() -> None:
             except Exception:
                 p.kill()
     _procs.clear()
+    _preview = None
 
+
+def _start_preview(channel: dict[str, Any], ffmpeg: str) -> None:
+    global _preview, _preview_argv
+    if not int(channel.get("preview_enabled") if channel.get("preview_enabled") is not None else 1):
+        log.info("preview disabled for this channel")
+        return
+    path = preview_path_for(channel)
+    _preview_argv = ffmpeg_preview_argv(
+        ffmpeg=ffmpeg,
+        feed_host=channel["local_feed_host"] or "127.0.0.1",
+        feed_port=int(channel["local_feed_port"]),
+        preview_path=path,
+    )
+    log.info("preview: %s", " ".join(_preview_argv))
+    # Brief delay so tsp has opened the UDP feed
+    time.sleep(0.8)
+    _preview = Popen(_preview_argv)
+
+
+def _ensure_preview() -> None:
+    """Restart preview sidecar if it exited (MediaMTX bounce, etc.)."""
+    global _preview, _preview_restart_at
+    if not _preview_argv:
+        return
+    if _preview is not None and _preview.poll() is None:
+        return
+    now = time.time()
+    if now < _preview_restart_at:
+        return
+    _preview_restart_at = now + 3.0
+    code = _preview.returncode if _preview is not None else "n/a"
+    log.warning("preview publisher down (code=%s) — restarting", code)
+    _preview = Popen(_preview_argv)
 
 def _send_to_spliceinject(payload: bytes) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -146,6 +190,8 @@ class _ControlHandler(socketserver.StreamRequestHandler):
                     "name": _channel.get("name"),
                     "splice_udp_port": _splice_udp,
                     "feed": f"{_channel.get('local_feed_host')}:{_channel.get('local_feed_port')}",
+                    "preview_path": preview_path_for(_channel) if _channel else None,
+                    "preview_alive": _preview is not None and _preview.poll() is None,
                     "pipeline_alive": all(p.poll() is None for p in _procs) if _procs else False,
                 }
             )
@@ -206,14 +252,19 @@ def _start_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
     if ff.stdout is not None:
         ff.stdout.close()  # tsp owns the pipe
     _procs.extend([ff, tsp])
+    try:
+        _start_preview(channel, bins["ffmpeg"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("preview publisher failed to start (non-fatal): %s", exc)
 
 
 def _watch_pipeline() -> Optional[int]:
-    """Return exit code if a child died; None if still healthy."""
+    """Return exit code if a core child (ingest/tsp) died; None if still healthy."""
     for p in _procs:
         code = p.poll()
         if code is not None:
             return code
+    _ensure_preview()
     return None
 
 
@@ -251,16 +302,17 @@ def main() -> int:
     _channel = channel
     _splice_udp = splice_udp_port_for(channel)
     sock_path = control_sock_path(args.service_name)
+    ppath = preview_path_for(channel)
 
     log.info(
-        "plan: %s type=%s delay_ms=%s feed=%s:%s splice_udp=%s scte_pid=%s sock=%s",
+        "plan: %s type=%s delay_ms=%s feed=%s:%s splice_udp=%s preview=%s sock=%s",
         channel["name"],
         channel["input_type"],
         channel["splice_insertion_delay_ms"],
         channel["local_feed_host"],
         channel["local_feed_port"],
         _splice_udp,
-        channel.get("scte35_pid") or 500,
+        ppath if int(channel.get("preview_enabled") if channel.get("preview_enabled") is not None else 1) else "off",
         sock_path,
     )
 
@@ -279,6 +331,18 @@ def main() -> int:
                 )
             ),
         )
+        if int(channel.get("preview_enabled") if channel.get("preview_enabled") is not None else 1):
+            print(
+                "PREVIEW",
+                " ".join(
+                    ffmpeg_preview_argv(
+                        ffmpeg=bins["ffmpeg"],
+                        feed_host=channel["local_feed_host"] or "127.0.0.1",
+                        feed_port=int(channel["local_feed_port"]),
+                        preview_path=ppath,
+                    )
+                ),
+            )
         return 0
 
     server = _start_control_server(sock_path)
@@ -303,7 +367,7 @@ def main() -> int:
         detail=(
             f"nexbreak-proc@{args.service_name} pipeline up; "
             f"feed {channel['local_feed_host']}:{channel['local_feed_port']}; "
-            f"splice_udp {_splice_udp}"
+            f"splice_udp {_splice_udp}; preview {ppath}"
         ),
     )
 

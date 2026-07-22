@@ -14,6 +14,7 @@ $activeNav = $activeNav ?? '';
 $nav = [
     'dashboard' => ['href' => '/index.php', 'label' => 'Dashboard'],
     'roll' => ['href' => '/roll.php', 'label' => 'Roll'],
+    'preview' => ['href' => '/preview.php', 'label' => 'Preview'],
     'channels' => ['href' => '/channels.php', 'label' => 'Channels'],
     'router' => ['href' => '/router.php', 'label' => 'Router'],
     'captions' => ['href' => '/captions.php', 'label' => 'Captions'],
@@ -30,8 +31,10 @@ $nav = [
 <script>
 // Same-origin: browser → /api/* → PHP proxy → controller :8787
 window.NEXBREAK_API = '/api';
+window.NEXBREAK_WHEP_PORT = 8889;
 </script>
 <script src="<?= htmlspecialchars(nexbreak_asset('/assets/nexbreak-api.js'), ENT_QUOTES, 'UTF-8') ?>"></script>
+<script src="<?= htmlspecialchars(nexbreak_asset('/assets/nexbreak-whep.js'), ENT_QUOTES, 'UTF-8') ?>"></script>
 </head>
 <body>
 <nav class="topnav" aria-label="Primary">

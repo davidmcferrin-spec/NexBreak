@@ -52,6 +52,18 @@ def migrate(conn: sqlite3.Connection) -> None:
         alters.append(
             "ALTER TABLE processing_channels ADD COLUMN splice_udp_port INTEGER"
         )
+    if "rtsp_transport" not in cols:
+        alters.append(
+            "ALTER TABLE processing_channels ADD COLUMN rtsp_transport TEXT NOT NULL DEFAULT 'tcp'"
+        )
+    if "preview_enabled" not in cols:
+        alters.append(
+            "ALTER TABLE processing_channels ADD COLUMN preview_enabled BOOLEAN NOT NULL DEFAULT 1"
+        )
+    if "preview_path" not in cols:
+        alters.append(
+            "ALTER TABLE processing_channels ADD COLUMN preview_path TEXT"
+        )
     for stmt in alters:
         conn.execute(stmt)
     if alters:
@@ -64,6 +76,14 @@ def splice_udp_port_for(channel: dict[str, Any]) -> int:
     if explicit is not None:
         return int(explicit)
     return int(channel["local_feed_port"]) + 1000
+
+
+def preview_path_for(channel: dict[str, Any]) -> str:
+    """MediaMTX path name for WHEP preview (e.g. nb1)."""
+    explicit = (channel.get("preview_path") or "").strip()
+    if explicit:
+        return explicit
+    return f"nb{channel['service_name']}"
 
 
 def control_sock_path(service_name: str) -> str:

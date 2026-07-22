@@ -41,14 +41,14 @@ nexbreak/
 ## One-channel signal path
 
 ```
-RTSP/SRT source
-    → ffmpeg (copy or transcode) → MPEG-TS pipe
+RTSP/SRT source  (ffmpeg client_pull, low-latency flags)
+    → ffmpeg → MPEG-TS pipe
     → tsp --add-input-stuffing
          -P pmt (SCTE-35 PID 0x86)
          -P spliceinject --udp 127.0.0.1:<feed+1000>
          -O ip 127.0.0.1:<local_feed_port>
-    → [router assigns feed to an egress]
-    → ffmpeg udp://feed → srt://… (listener or caller)
+         ├─→ nexbreak-egress → SRT
+         └─→ ffmpeg preview → RTSP publish → MediaMTX → WHEP (browser)
 ```
 
 Splice path:
@@ -59,6 +59,25 @@ Web/panel → POST /api/v1/splice → controller
          → wait splice_insertion_delay_ms
          → UDP SCTE-35 XML/hex → tsp spliceinject
 ```
+
+### WebRTC preview
+
+| Piece | Detail |
+|---|---|
+| MediaMTX | `config/mediamtx.yml` · `nexbreak-mediamtx.service` |
+| Path | `nb{service_name}` (override via `preview_path`) |
+| WHEP | `http://<host>:8889/nb1/whep` |
+| Media | UDP/TCP **8189** |
+| UI | **Preview** page + embedded players on **Roll** |
+
+```bash
+sudo systemctl enable --now nexbreak-mediamtx
+# ufw (LAN):
+sudo ufw allow 8889/tcp comment 'NexBreak WHEP'
+sudo ufw allow 8189 comment 'NexBreak WebRTC media'
+```
+
+Set a real RTSP URL on Channels → Input 1, restart `nexbreak-proc@1`, open Preview.
 
 ## Ubuntu bring-up
 
@@ -84,8 +103,9 @@ Open `http://<host>/` for the UI.
 
 | Tool | Role |
 |---|---|
-| `ffmpeg` (with libsrt) | Ingest remux/transcode + SRT egress |
+| `ffmpeg` (libsrt + libopus) | Ingest, SRT egress, preview RTSP publish |
 | `tsduck` (`tsp`) | PMT SCTE declare + `spliceinject` |
+| `mediamtx` | WHEP WebRTC preview |
 | Apache + `libapache2-mod-php` | UI + `/api` proxy |
 | Python 3 stdlib | Controller / service orchestration |
 

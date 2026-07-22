@@ -1,7 +1,7 @@
 [Unit]
 Description=NexBreak processing channel %i (ingest + SCTE splice + captioning)
-After=network-online.target
-Wants=network-online.target
+After=network-online.target nexbreak-mediamtx.service
+Wants=network-online.target nexbreak-mediamtx.service
 StartLimitIntervalSec=60
 StartLimitBurst=5
 

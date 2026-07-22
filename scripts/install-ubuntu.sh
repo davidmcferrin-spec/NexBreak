@@ -27,10 +27,21 @@ cmd_deps() {
     apache2 libapache2-mod-php php-sqlite3 php-curl \
     ffmpeg \
     python3 \
-    curl
+    curl \
+    rsync
   # TSDuck: prefer distro package; fall back to note if missing
   if ! apt-get install -y tsduck; then
     echo "WARN: tsduck package not in apt — install from https://tsduck.io/download/" >&2
+  fi
+  # MediaMTX binary (WebRTC WHEP preview)
+  if [[ ! -x /usr/local/bin/mediamtx ]]; then
+    local ver="${MEDIAMTX_VERSION:-v1.12.2}"
+    local arch="linux_amd64"
+    local url="https://github.com/bluenviron/mediamtx/releases/download/${ver}/mediamtx_${ver}_${arch}.tar.gz"
+    echo "Installing MediaMTX ${ver}…"
+    curl -fsSL "$url" | tar -xz -C /tmp mediamtx
+    install -m 755 /tmp/mediamtx /usr/local/bin/mediamtx
+    rm -f /tmp/mediamtx
   fi
   a2enmod rewrite headers
   systemctl reload apache2 || true
@@ -49,6 +60,9 @@ cmd_install() {
   install -m 644 "$PREFIX"/systemd/nexbreak-controller.service /etc/systemd/system/
   install -m 644 "$PREFIX"/systemd/nexbreak-proc@.service /etc/systemd/system/
   install -m 644 "$PREFIX"/systemd/nexbreak-egress@.service /etc/systemd/system/
+  install -m 644 "$PREFIX"/systemd/nexbreak-mediamtx.service /etc/systemd/system/
+  mkdir -p /etc/nexbreak
+  install -m 644 "$PREFIX"/config/mediamtx.yml /etc/nexbreak/mediamtx.yml
   if [[ -f "$PREFIX"/config/apache-nexbreak.conf ]]; then
     install -m 644 "$PREFIX"/config/apache-nexbreak.conf /etc/apache2/sites-available/nexbreak.conf
     # Rewrite DocumentRoot to PREFIX/web
@@ -69,16 +83,18 @@ cmd_init_db() {
 }
 
 cmd_enable() {
+  systemctl enable --now nexbreak-mediamtx
   systemctl enable --now nexbreak-controller
   systemctl enable --now nexbreak-proc@1
   systemctl enable --now nexbreak-egress@1
-  systemctl status --no-pager nexbreak-controller 'nexbreak-proc@1' 'nexbreak-egress@1' || true
+  systemctl status --no-pager nexbreak-mediamtx nexbreak-controller 'nexbreak-proc@1' 'nexbreak-egress@1' || true
 }
 
 cmd_status() {
-  systemctl status --no-pager nexbreak-controller 'nexbreak-proc@*' 'nexbreak-egress@*' || true
+  systemctl status --no-pager nexbreak-mediamtx nexbreak-controller 'nexbreak-proc@*' 'nexbreak-egress@*' || true
   echo "---"
   curl -sS http://127.0.0.1:8787/v1/health || echo "controller not reachable"
+  curl -sS http://127.0.0.1:9997/v3/paths/list || echo "mediamtx API not reachable"
 }
 
 main() {

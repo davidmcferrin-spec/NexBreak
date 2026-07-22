@@ -1,0 +1,53 @@
+###############################################################################
+# MediaMTX — NexBreak preview (LAN)
+#
+# Ingest:  nexbreak-proc publishes RTSP to 127.0.0.1:8554 / nbN
+# Egress:  browsers play via WHEP  http://<host>:8889/nbN/whep
+#
+# Default: no TLS (matches Apache HTTP bring-up). When the UI is HTTPS,
+# enable webrtcEncryption + apiEncryption and point certs at real files —
+# same pattern as NexVUE.
+###############################################################################
+
+logLevel: info
+logDestinations: [stdout]
+
+api: yes
+apiAddress: 127.0.0.1:9997
+apiAllowOrigin: '*'
+
+hls: no
+rtmp: no
+srt: no
+webrtcICEServers2: []
+
+# Publishers only on loopback
+rtsp: yes
+rtspTransports: [tcp]
+rtspAddress: 127.0.0.1:8554
+
+# WHEP for operator browsers (LAN)
+webrtc: yes
+webrtcAddress: :8889
+webrtcEncryption: no
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+webrtcIPsFromInterfaces: yes
+# Uncomment and set to the station FQDN/IP if viewers are off-subnet:
+# webrtcAdditionalHosts: [nexbreak.example.com]
+
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    permissions:
+      - action: publish
+      - action: read
+      - action: api
+
+pathDefaults:
+  source: publisher
+
+paths:
+  # nb1..nb16 — one path per nexbreak-proc@ instance (preview_path)
+  ~^nb([1-9]|1[0-6])$:
