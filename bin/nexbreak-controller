@@ -637,6 +637,38 @@ class Handler(BaseHTTPRequestHandler):
                             if fields[key] in (True, 1, "1", "true", "on")
                             else 0
                         )
+                # Reject incomplete SRT caller/listener configs up front.
+                row = conn.execute(
+                    "SELECT * FROM processing_channels WHERE id = ?", (cid,)
+                ).fetchone()
+                if not row:
+                    self._send(404, {"ok": False, "error": "not found"})
+                    return
+                merged = dict(row_to_dict(row) or {})
+                merged.update(fields)
+                if merged.get("input_type") == "srt":
+                    mode = (merged.get("srt_mode") or "caller").lower()
+                    if mode == "listener":
+                        if not merged.get("srt_listen_port"):
+                            self._send(
+                                400,
+                                {
+                                    "ok": False,
+                                    "error": "srt_listen_port required for SRT listener",
+                                },
+                            )
+                            return
+                    elif not merged.get("srt_remote_host") or not merged.get(
+                        "srt_remote_port"
+                    ):
+                        self._send(
+                            400,
+                            {
+                                "ok": False,
+                                "error": "srt_remote_host and srt_remote_port required for SRT caller/rendezvous",
+                            },
+                        )
+                        return
                 sets = ", ".join(f"{k} = ?" for k in fields)
                 vals = list(fields.values()) + [cid]
                 conn.execute(
@@ -654,20 +686,15 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 hot = None
                 if "captioning_enabled" in fields:
-                    row = conn.execute(
-                        "SELECT service_name FROM processing_channels WHERE id = ?",
-                        (cid,),
-                    ).fetchone()
-                    if row:
-                        sock = control_sock_path(row["service_name"])
-                        try:
-                            hot = send_caption_set(
-                                sock, enabled=bool(int(fields["captioning_enabled"]))
-                            )
-                        except FileNotFoundError:
-                            hot = {"ok": False, "error": "proc not running — will apply on next start"}
-                        except Exception as exc:  # noqa: BLE001
-                            hot = {"ok": False, "error": str(exc)}
+                    sock = control_sock_path(row["service_name"])
+                    try:
+                        hot = send_caption_set(
+                            sock, enabled=bool(int(fields["captioning_enabled"]))
+                        )
+                    except FileNotFoundError:
+                        hot = {"ok": False, "error": "proc not running — will apply on next start"}
+                    except Exception as exc:  # noqa: BLE001
+                        hot = {"ok": False, "error": str(exc)}
                 self._send(200, {"ok": True, "caption_hot": hot})
                 return
 

@@ -357,10 +357,16 @@
     var id = document.getElementById("p-id").value;
     var inputType = document.getElementById("p-input_type").value;
     var rtspUrl = document.getElementById("p-rtsp_url").value || null;
-    // Paste of srt:// into the URL box (or leftover after type switch)
-    if (rtspUrl && /^srt:\/\//i.test(rtspUrl)) {
+    var srtPaste = document.getElementById("p-srt_paste").value || "";
+    // Apply srt:// paste even if the user never blurred the field.
+    if (srtPaste && /^srt:\/\//i.test(srtPaste)) {
+      applySrtUrlToFields(srtPaste);
+      document.getElementById("p-srt_paste").value = "";
+      inputType = "srt";
+    } else if (rtspUrl && /^srt:\/\//i.test(rtspUrl)) {
       applySrtUrlToFields(rtspUrl);
       inputType = "srt";
+      rtspUrl = null;
     }
     var body = {
       name: document.getElementById("p-name").value,
@@ -369,7 +375,7 @@
       rtsp_url: inputType === "rtsp" ? rtspUrl : null,
       rtsp_transport: document.getElementById("p-rtsp_transport").value,
       srt_mode: document.getElementById("p-srt_mode").value,
-      srt_remote_host: document.getElementById("p-srt_remote_host").value || null,
+      srt_remote_host: (document.getElementById("p-srt_remote_host").value || "").trim() || null,
       srt_remote_port: document.getElementById("p-srt_remote_port").value
         ? Number(document.getElementById("p-srt_remote_port").value)
         : null,
@@ -397,9 +403,19 @@
     if (inputType !== "decklink") {
       body.decklink_device_index = null;
     }
-    if (inputType === "srt" && !body.srt_remote_host && !body.srt_listen_port) {
-      api.toast("SRT caller needs remote host/port (or listener needs listen port)", "error");
-      return;
+    if (inputType === "srt") {
+      if (body.srt_mode === "listener") {
+        if (!body.srt_listen_port) {
+          api.toast("SRT listener needs a listen port", "error");
+          return;
+        }
+      } else if (!body.srt_remote_host || !body.srt_remote_port) {
+        api.toast(
+          "SRT caller needs remote host AND port (or paste srt://host:port)",
+          "error"
+        );
+        return;
+      }
     }
     var res = await api.post("/v1/processing/" + id + "/config", body);
     if (!res.ok || !res.data || !res.data.ok) {
@@ -407,7 +423,7 @@
       return;
     }
     api.toast(
-      "Processing saved — restart nexbreak-proc@" + id + " if ingest settings changed",
+      "Processing saved — restart nexbreak-proc@" + id + " for ingest changes",
       "success"
     );
     procEditor.hidden = true;
