@@ -334,6 +334,45 @@ table.data tbody tr:hover { background: var(--row-selected); }
   gap: 10px;
 }
 
+/* Roll: compact live tiles */
+#roll-grid {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 380px));
+  justify-content: start;
+}
+
+#roll-grid .channel-card {
+  max-width: 380px;
+}
+
+#roll-grid .preview-slot {
+  width: 100%;
+  max-width: 380px;
+  aspect-ratio: 16 / 9;
+}
+
+/* Preview page: larger fixed 720×405 tiles */
+#preview-grid {
+  grid-template-columns: repeat(auto-fill, minmax(320px, 720px));
+  justify-content: start;
+}
+
+#preview-grid .channel-card {
+  max-width: min(720px, 100%);
+  width: 100%;
+}
+
+#preview-grid .preview-slot {
+  width: 100%;
+  max-width: 720px;
+  aspect-ratio: 16 / 9;
+}
+
+@media (max-width: 760px) {
+  #preview-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .channel-card {
   background: var(--bg);
   border: 1px solid var(--edge);
@@ -355,6 +394,7 @@ table.data tbody tr:hover { background: var(--row-selected); }
 
 .preview-slot {
   aspect-ratio: 16 / 9;
+  width: 100%;
   background: #000;
   border: 1px solid var(--edge);
   border-radius: 4px;

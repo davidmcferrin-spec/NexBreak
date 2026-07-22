@@ -143,7 +143,7 @@ def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
     mode = (channel.get("ingest_mode") or "copy").lower()
     bitrate = int(channel.get("target_bitrate_kbps") or 14000)
 
-    argv = [ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostdin"]
+    argv = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
 
     if kind == "rtsp":
         transport = (channel.get("rtsp_transport") or "tcp").lower()
@@ -163,10 +163,13 @@ def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
         device = str(int(channel["decklink_device_index"]))
         argv += ["-f", "decklink", "-i", device]
     else:
-        # SRT (and anything else ffmpeg understands as a URL)
+        # SRT (and anything else ffmpeg understands as a URL).
+        # Mid-GOP join on HEVC prints PPS warnings until the next IDR — normal for copy.
         argv += [
             "-fflags", "nobuffer+genpts+discardcorrupt",
             "-flags", "low_delay",
+            "-analyzeduration", "2000000",
+            "-probesize", "1000000",
             "-i", url,
         ]
 
@@ -204,21 +207,38 @@ def ffmpeg_preview_argv(
 ) -> list[str]:
     """
     Republish the local MPEG-TS UDP feed to MediaMTX over RTSP (loopback).
-    Video copy; audio → Opus for browser WebRTC friendliness.
+
+    Always transcode video → H.264 (baseline) + audio → Opus so WHEP works in
+    browsers even when the program path is HEVC/AAC copy. Ops preview only —
+    does not touch the splice/egress feed.
     """
     base = (mediamtx_rtsp or os.environ.get("NEXBREAK_MEDIAMTX_RTSP") or "rtsp://127.0.0.1:8554").rstrip("/")
     dst = f"{base}/{preview_path}"
     src = f"udp://{feed_host}:{int(feed_port)}?reuse=1&fifo_size=1000000&overrun_nonfatal=1"
+    # Optional scale for CPU — default 1280 wide keeps 16:9 without full UHD encode cost.
+    scale = (os.environ.get("NEXBREAK_PREVIEW_SCALE") or "1280:-2").strip()
+    vbitrate = (os.environ.get("NEXBREAK_PREVIEW_VBITRATE") or "1500k").strip()
     return [
         ffmpeg,
         "-hide_banner",
-        "-loglevel", "warning",
+        "-loglevel", "error",
         "-nostdin",
-        "-fflags", "+genpts",
+        "-fflags", "+genpts+discardcorrupt",
+        "-analyzeduration", "3000000",
+        "-probesize", "2000000",
         "-i", src,
         "-map", "0:v:0?",
         "-map", "0:a:0?",
-        "-c:v", "copy",
+        "-vf", f"scale={scale}",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-profile:v", "baseline",
+        "-pix_fmt", "yuv420p",
+        "-b:v", vbitrate,
+        "-maxrate", vbitrate,
+        "-bufsize", "3000k",
+        "-g", "30",
         "-c:a", "libopus",
         "-b:a", "64k",
         "-ac", "2",

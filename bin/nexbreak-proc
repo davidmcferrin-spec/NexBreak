@@ -118,8 +118,8 @@ def _start_preview(channel: dict[str, Any], ffmpeg: str) -> None:
         preview_path=path,
     )
     log.info("preview: %s", " ".join(_preview_argv))
-    # Brief delay so tsp has opened the UDP feed
-    time.sleep(0.8)
+    # Let ingest+tsp publish PAT/PMT (+ preferably a keyframe) before preview attaches.
+    time.sleep(1.5)
     _preview = Popen(_preview_argv)
 
 
