@@ -15,7 +15,10 @@ require __DIR__ . '/include/header.php';
 
 <section class="two-col">
   <div class="panel">
-    <h2>Processing (inputs)</h2>
+    <div class="panel-head">
+      <h2>Processing (inputs)</h2>
+      <span id="proc-summary" class="panel-meta"></span>
+    </div>
     <div id="proc-list"><div class="empty">Loading…</div></div>
   </div>
   <div class="panel">
@@ -24,61 +27,133 @@ require __DIR__ . '/include/header.php';
   </div>
 </section>
 
-<section class="panel" id="editor" hidden>
+<section class="panel" id="proc-editor" hidden>
   <h2>Edit processing channel</h2>
   <form id="proc-form" class="form-grid">
-    <input type="hidden" name="id" id="f-id">
-    <label>Name <input name="name" id="f-name" required></label>
+    <input type="hidden" name="id" id="p-id">
+    <label>Name <input name="name" id="p-name" required></label>
     <label>Input type
-      <select name="input_type" id="f-input_type">
+      <select name="input_type" id="p-input_type">
         <option value="rtsp">RTSP</option>
         <option value="srt">SRT</option>
         <option value="decklink">DeckLink</option>
       </select>
     </label>
-    <label>RTSP URL <input name="rtsp_url" id="f-rtsp_url" placeholder="rtsp://host/stream"></label>
-    <label>RTSP transport
-      <select name="rtsp_transport" id="f-rtsp_transport">
+
+    <label class="proc-rtsp">RTSP role
+      <select id="p-rtsp_role">
+        <option value="client_pull">Client pull (we connect out)</option>
+        <option value="server_push">Server push (they push to us)</option>
+      </select>
+    </label>
+    <label class="proc-rtsp proc-rtsp-url">RTSP URL <input id="p-rtsp_url" placeholder="rtsp://host/stream"></label>
+    <label class="proc-rtsp proc-rtsp-url">RTSP transport
+      <select id="p-rtsp_transport">
         <option value="tcp">TCP</option>
         <option value="udp">UDP</option>
       </select>
     </label>
+
+    <label class="proc-srt">SRT mode
+      <select id="p-srt_mode">
+        <option value="caller">Caller (we connect out)</option>
+        <option value="listener">Listener (we accept)</option>
+        <option value="rendezvous">Rendezvous</option>
+      </select>
+    </label>
+    <label class="proc-srt proc-srt-remote">Remote host <input id="p-srt_remote_host" placeholder="10.0.0.50"></label>
+    <label class="proc-srt proc-srt-remote">Remote port <input type="number" id="p-srt_remote_port" min="1" max="65535"></label>
+    <label class="proc-srt proc-srt-listen">Listen port <input type="number" id="p-srt_listen_port" min="1" max="65535"></label>
+
+    <label class="proc-decklink">DeckLink device index <input type="number" id="p-decklink" min="0" step="1"></label>
+
     <label>Ingest mode
-      <select name="ingest_mode" id="f-ingest_mode">
+      <select id="p-ingest_mode">
         <option value="copy">Copy (remux)</option>
         <option value="transcode">Transcode</option>
       </select>
     </label>
-    <label>Splice delay (ms) <input type="number" name="splice_insertion_delay_ms" id="f-delay" min="0" step="100"></label>
-    <label>Local feed port <input type="number" name="local_feed_port" id="f-feed_port"></label>
-    <label>Target bitrate (kbps) <input type="number" name="target_bitrate_kbps" id="f-bitrate"></label>
-    <label>Preview path <input name="preview_path" id="f-preview_path" placeholder="nb1"></label>
+    <label>Splice delay (ms) <input type="number" id="p-delay" min="0" step="100"></label>
+    <label>Local feed port <input type="number" id="p-feed_port"></label>
+    <label>Target bitrate (kbps) <input type="number" id="p-bitrate"></label>
+    <label>Preview path <input id="p-preview_path" placeholder="nb1"></label>
     <label>Preview
-      <select name="preview_enabled" id="f-preview_enabled">
+      <select id="p-preview_enabled">
         <option value="1">On</option>
         <option value="0">Off</option>
       </select>
     </label>
     <label>Captioning
-      <select name="captioning_enabled" id="f-captioning">
+      <select id="p-captioning">
         <option value="0">Off</option>
         <option value="1">On</option>
       </select>
     </label>
     <label>Enabled
-      <select name="enabled" id="f-enabled">
+      <select id="p-enabled">
         <option value="1">Yes</option>
         <option value="0">No</option>
       </select>
     </label>
   </form>
+  <p class="warn-banner" id="proc-rtsp-push-warn" hidden style="margin-top:10px">
+    RTSP <code>server_push</code> needs an embedded RTSP server — not in v1 yet. Prefer <code>client_pull</code>.
+  </p>
   <p class="warn-banner" style="margin-top:10px">
     Captioning on/off is applied live (stops/starts Vosk only — no proc restart).
-    RTSP URL / feed / preview path changes still need <code>nexbreak-proc@N</code> restart.
+    Input type / URL / SRT ports / feed / preview path changes need <code>nexbreak-proc@N</code> restart.
   </p>
   <div class="bar" style="margin-top:12px">
-    <button type="button" class="primary" id="btn-save">Save</button>
-    <button type="button" id="btn-cancel">Cancel</button>
+    <button type="button" class="primary" id="btn-proc-save">Save</button>
+    <button type="button" id="btn-proc-cancel">Cancel</button>
+  </div>
+</section>
+
+<section class="panel" id="egr-editor" hidden>
+  <h2>Edit egress channel</h2>
+  <form id="egr-form" class="form-grid">
+    <input type="hidden" id="e-id">
+    <label>Name <input id="e-name" required></label>
+    <label>Output type
+      <select id="e-output_type">
+        <option value="srt">SRT</option>
+        <option value="hls">HLS</option>
+      </select>
+    </label>
+    <label class="egr-srt">SRT mode
+      <select id="e-srt_mode">
+        <option value="caller">Caller (we connect out)</option>
+        <option value="listener">Listener (we accept)</option>
+        <option value="rendezvous">Rendezvous</option>
+      </select>
+    </label>
+    <label class="egr-srt egr-srt-remote">Remote host <input id="e-srt_remote_host" placeholder="10.0.0.50"></label>
+    <label class="egr-srt egr-srt-remote">Remote port <input type="number" id="e-srt_remote_port" min="1" max="65535"></label>
+    <label class="egr-srt egr-srt-listen">Listen port <input type="number" id="e-srt_listen_port" min="1" max="65535"></label>
+    <label class="egr-hls">HLS mode
+      <select id="e-hls_mode">
+        <option value="origin_pull">Origin pull (we host)</option>
+        <option value="push_put">Push PUT (remote ingest)</option>
+      </select>
+    </label>
+    <label class="egr-hls egr-hls-push">Push URL <input id="e-hls_push_url" placeholder="https://cdn.example/ingest/…"></label>
+    <label>Target bitrate (kbps) <input type="number" id="e-bitrate"></label>
+    <label>Enabled
+      <select id="e-enabled">
+        <option value="1">Yes</option>
+        <option value="0">No</option>
+      </select>
+    </label>
+  </form>
+  <p class="warn-banner" id="egr-hls-warn" hidden style="margin-top:10px">
+    HLS egress is in the schema but not implemented in <code>nexbreak-egress</code> yet (v1 = SRT only).
+  </p>
+  <p class="warn-banner" style="margin-top:10px">
+    After saving, restart <code>nexbreak-egress@N</code> (Services page) for transport changes to take effect.
+  </p>
+  <div class="bar" style="margin-top:12px">
+    <button type="button" class="primary" id="btn-egr-save">Save</button>
+    <button type="button" id="btn-egr-cancel">Cancel</button>
   </div>
 </section>
 <?php require __DIR__ . '/include/footer.php'; ?>

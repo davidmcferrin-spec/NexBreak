@@ -109,6 +109,9 @@ sudo bash scripts/install-ubuntu.sh deps
 sudo bash scripts/install-ubuntu.sh install
 sudo bash scripts/install-ubuntu.sh init-db
 
+# deps also installs chrony, enables NTP, and sets timezone
+# America/New_York (override with NEXBREAK_TIMEZONE=...).
+
 # Point channel 1 at a real RTSP source (SQL or Channels UI), then:
 sudo systemctl enable --now nexbreak-controller
 sudo systemctl enable --now nexbreak-proc@1
@@ -121,6 +124,15 @@ sudo -u nexbreak python3 /opt/nexbreak/bin/nexbreak-proc \
 
 Apache site: `config/apache-nexbreak.conf` (installed as `nexbreak.conf`).
 Open `http://<host>/` for the UI.
+
+**Channels** edits processing inputs and egress outputs (SRT caller/listener/
+rendezvous, HLS modes — HLS not wired in the egress binary yet). Transport
+changes need a unit restart.
+
+**Services** / **Metrics** mirror NexVUE ops: `install` drops allowlisted
+`/usr/local/bin/nexbreak-ops-*.sh` + `/etc/sudoers.d/nexbreak-ops` so the
+Services page can status/journal/restart channel units as `www-data`.
+Metrics charts splice/config/routing activity from `audit_events`.
 
 ### Troubleshooting: "controller unreachable" / API 500
 

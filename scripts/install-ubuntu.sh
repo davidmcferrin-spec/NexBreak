@@ -11,14 +11,31 @@ usage() {
   cat <<EOF
 Usage: sudo $0 <command>
 
-  deps          Install apt packages (ffmpeg, tsduck, apache, php)
+  deps          Install apt packages (ffmpeg, tsduck, chrony, apache, php)
   install       Copy tree to $PREFIX, create user/dirs, install units
   init-db       Create SQLite schema + seed 4 demo channels
   enable        Enable controller + proc@1 + egress@1
   status        systemctl status snapshot
 
 Env overrides: NEXBREAK_PREFIX NEXBREAK_DATA NEXBREAK_LOG
+               NEXBREAK_TIMEZONE (default America/New_York)
 EOF
+}
+
+install_chrony() {
+  # Accurate clock for splice timestamps / audit / logs.
+  local tz="${NEXBREAK_TIMEZONE:-America/New_York}"
+  apt-get install -y chrony tzdata
+  if timedatectl list-timezones 2>/dev/null | grep -qx "$tz"; then
+    timedatectl set-timezone "$tz"
+  else
+    echo "WARN: timezone $tz not found; leaving system timezone unchanged" >&2
+  fi
+  timedatectl set-ntp true 2>/dev/null || true
+  systemctl enable --now chrony
+  # Prefer chronyd if the unit name differs (some images).
+  systemctl enable --now chronyd 2>/dev/null || true
+  echo "Time: timezone=$(timedatectl show -p Timezone --value 2>/dev/null || echo "$tz") chrony=$(systemctl is-active chrony 2>/dev/null || systemctl is-active chronyd 2>/dev/null || echo unknown)"
 }
 
 install_tsduck() {
@@ -73,6 +90,7 @@ cmd_deps() {
     python3 \
     curl \
     rsync
+  install_chrony
   install_tsduck
   # MediaMTX binary (WebRTC WHEP preview)
   if [[ ! -x /usr/local/bin/mediamtx ]]; then
@@ -112,6 +130,18 @@ cmd_install() {
     # Rewrite DocumentRoot to PREFIX/web
     sed -i "s|/opt/nexbreak|$PREFIX|g" /etc/apache2/sites-available/nexbreak.conf
     a2ensite nexbreak || true
+  fi
+  # Services page: allowlisted sudo wrappers for www-data (NexVUE pattern)
+  for s in nexbreak-ops-status.sh nexbreak-ops-journal.sh nexbreak-ops-restart.sh nexbreak-ops-enable.sh; do
+    install -m 755 "$PREFIX/scripts/ops/$s" "/usr/local/bin/$s"
+  done
+  if [[ -f "$PREFIX"/config/nexbreak-ops.sudoers ]]; then
+    install -m 440 "$PREFIX"/config/nexbreak-ops.sudoers /etc/sudoers.d/nexbreak-ops
+    if ! visudo -cf /etc/sudoers.d/nexbreak-ops >/dev/null; then
+      echo "ERROR: nexbreak-ops.sudoers failed visudo — removing" >&2
+      rm -f /etc/sudoers.d/nexbreak-ops
+      exit 1
+    fi
   fi
   systemctl daemon-reload
   systemctl reload apache2 || true

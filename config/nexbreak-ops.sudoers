@@ -1,0 +1,14 @@
+# /etc/sudoers.d/nexbreak-ops
+#
+# NexBreak Services UI (web/ops.php) runs as www-data and may only invoke
+# these allowlisted wrappers — no shell, no arbitrary systemctl/journalctl.
+# Trailing * permits arguments; each wrapper validates them itself.
+#
+# LAN-trust Phase 1: do not expose Services on a DMZ without auth.
+
+Defaults:www-data !requiretty
+
+www-data ALL=(root) NOPASSWD: /usr/local/bin/nexbreak-ops-status.sh *
+www-data ALL=(root) NOPASSWD: /usr/local/bin/nexbreak-ops-journal.sh *
+www-data ALL=(root) NOPASSWD: /usr/local/bin/nexbreak-ops-restart.sh *
+www-data ALL=(root) NOPASSWD: /usr/local/bin/nexbreak-ops-enable.sh *

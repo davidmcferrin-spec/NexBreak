@@ -161,12 +161,13 @@ Done:
   + caption/Vosk sidecar (hot on/off bypass; never fatal to core pipeline)
 - `nexbreak-egress`: UDP local feed → SRT (ffmpeg)
 - `web/` UI: Dashboard, Roll (with live preview + CC toggle), Preview,
-  Channels, Router, Captions (per-stream bypass + lexicon/blacklist), Audit;
-  `/api` PHP proxy to controller
+  Channels (processing + egress editors), Router, Captions, Services
+  (systemd/journal via allowlisted sudo wrappers), Metrics (audit-derived
+  splice/config/routing activity), Audit; `/api` PHP proxy to controller
 
 Next:
 - Hardware bring-up of channel 1 against a real RTSP source
 - Caption audio tap + CEA-608/708 insert into the local feed
-- Privileged helper for systemctl (leaning Unix-socket helper over sudoers)
+- Optional: replace sudoers ops wrappers with Unix-socket privileged helper
 - HLS egress mode
 - TLS on MediaMTX when UI is HTTPS (same NexVUE pattern)

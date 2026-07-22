@@ -175,6 +175,114 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": True, "channels": rows_to_dicts(rows)})
                 return
 
+            if path.startswith("/v1/egress/") and path.count("/") == 3:
+                eid = int(path.rsplit("/", 1)[-1])
+                row = conn.execute(
+                    "SELECT * FROM egress_channels WHERE id = ?", (eid,)
+                ).fetchone()
+                if not row:
+                    self._send(404, {"ok": False, "error": "not found"})
+                    return
+                self._send(200, {"ok": True, "channel": row_to_dict(row)})
+                return
+
+            if path == "/v1/metrics":
+                # Operational metrics from audit_events (not viewer analytics).
+                range_key = (qs.get("range") or ["24h"])[0]
+                ranges = {
+                    "15m": (15 * 60, 60),
+                    "1h": (3600, 300),
+                    "6h": (6 * 3600, 900),
+                    "24h": (86400, 3600),
+                    "7d": (7 * 86400, 6 * 3600),
+                }
+                if range_key not in ranges:
+                    self._send(400, {"ok": False, "error": "invalid range"})
+                    return
+                span_s, bucket_s = ranges[range_key]
+                since_expr = f"-{span_s} seconds"
+                # Bucket labels via unixepoch flooring (SQLite 3.38+ / Ubuntu 24).
+                rows = conn.execute(
+                    """
+                    SELECT
+                      (CAST(strftime('%s', occurred_at) AS INTEGER) / ?) * ? AS bucket_ts,
+                      event_type,
+                      COALESCE(result, '') AS result,
+                      COUNT(*) AS n
+                    FROM audit_events
+                    WHERE occurred_at >= datetime('now', ?)
+                    GROUP BY 1, 2, 3
+                    ORDER BY 1
+                    """,
+                    (bucket_s, bucket_s, since_expr),
+                ).fetchall()
+                by_channel = conn.execute(
+                    """
+                    SELECT
+                      ae.processing_channel_id AS id,
+                      pc.name AS name,
+                      SUM(CASE WHEN ae.event_type = 'splice_command' THEN 1 ELSE 0 END) AS splices,
+                      SUM(CASE WHEN ae.event_type = 'splice_command' AND ae.result = 'success' THEN 1 ELSE 0 END) AS splice_ok,
+                      SUM(CASE WHEN ae.event_type = 'splice_command' AND ae.result = 'failure' THEN 1 ELSE 0 END) AS splice_fail,
+                      SUM(CASE WHEN ae.event_type = 'config_change' THEN 1 ELSE 0 END) AS config_changes
+                    FROM audit_events ae
+                    LEFT JOIN processing_channels pc ON pc.id = ae.processing_channel_id
+                    WHERE ae.occurred_at >= datetime('now', ?)
+                      AND ae.processing_channel_id IS NOT NULL
+                    GROUP BY ae.processing_channel_id
+                    ORDER BY ae.processing_channel_id
+                    """,
+                    (since_expr,),
+                ).fetchall()
+                totals = conn.execute(
+                    """
+                    SELECT
+                      SUM(CASE WHEN event_type = 'splice_command' THEN 1 ELSE 0 END) AS splices,
+                      SUM(CASE WHEN event_type = 'splice_command' AND result = 'success' THEN 1 ELSE 0 END) AS splice_ok,
+                      SUM(CASE WHEN event_type = 'splice_command' AND result = 'failure' THEN 1 ELSE 0 END) AS splice_fail,
+                      SUM(CASE WHEN event_type = 'routing_change' THEN 1 ELSE 0 END) AS routing_changes,
+                      SUM(CASE WHEN event_type = 'config_change' THEN 1 ELSE 0 END) AS config_changes,
+                      SUM(CASE WHEN event_type = 'service_lifecycle' THEN 1 ELSE 0 END) AS lifecycle_events
+                    FROM audit_events
+                    WHERE occurred_at >= datetime('now', ?)
+                    """,
+                    (since_expr,),
+                ).fetchone()
+                proc = conn.execute(
+                    "SELECT id, name, enabled, input_type, captioning_enabled FROM processing_channels ORDER BY id"
+                ).fetchall()
+                egr = conn.execute(
+                    "SELECT id, name, enabled, output_type, srt_mode FROM egress_channels ORDER BY id"
+                ).fetchall()
+                routes = conn.execute(
+                    """
+                    SELECT ra.processing_channel_id, ra.egress_channel_id,
+                           pc.name AS processing_name, ec.name AS egress_name
+                    FROM routing_assignments ra
+                    JOIN processing_channels pc ON pc.id = ra.processing_channel_id
+                    JOIN egress_channels ec ON ec.id = ra.egress_channel_id
+                    ORDER BY ec.id
+                    """
+                ).fetchall()
+                self._send(
+                    200,
+                    {
+                        "ok": True,
+                        "range": range_key,
+                        "bucket_seconds": bucket_s,
+                        "span_seconds": span_s,
+                        "totals": row_to_dict(totals) or {},
+                        "series": rows_to_dicts(rows),
+                        "by_channel": rows_to_dicts(by_channel),
+                        "channels": {
+                            "processing": rows_to_dicts(proc),
+                            "egress": rows_to_dicts(egr),
+                            "routes": rows_to_dicts(routes),
+                        },
+                    },
+                )
+                return
+
             if path == "/v1/routing":
                 rows = conn.execute(
                     """
@@ -475,6 +583,60 @@ class Handler(BaseHTTPRequestHandler):
                 if not fields:
                     self._send(400, {"ok": False, "error": "no updatable fields"})
                     return
+                if "input_type" in fields and fields["input_type"] not in (
+                    "rtsp",
+                    "srt",
+                    "decklink",
+                ):
+                    self._send(400, {"ok": False, "error": "invalid input_type"})
+                    return
+                if "srt_mode" in fields and fields["srt_mode"] not in (
+                    None,
+                    "",
+                    "caller",
+                    "listener",
+                    "rendezvous",
+                ):
+                    self._send(400, {"ok": False, "error": "invalid srt_mode"})
+                    return
+                if "rtsp_role" in fields and fields["rtsp_role"] not in (
+                    None,
+                    "",
+                    "client_pull",
+                    "server_push",
+                ):
+                    self._send(400, {"ok": False, "error": "invalid rtsp_role"})
+                    return
+                for key in (
+                    "srt_remote_host",
+                    "rtsp_url",
+                    "preview_path",
+                    "srt_mode",
+                    "rtsp_role",
+                ):
+                    if key in fields and fields[key] == "":
+                        fields[key] = None
+                for key in (
+                    "srt_remote_port",
+                    "srt_listen_port",
+                    "decklink_device_index",
+                    "target_bitrate_kbps",
+                ):
+                    if key in fields and fields[key] in ("", None):
+                        fields[key] = None
+                    elif key in fields:
+                        fields[key] = int(fields[key])
+                for key in (
+                    "captioning_enabled",
+                    "preview_enabled",
+                    "enabled",
+                ):
+                    if key in fields:
+                        fields[key] = (
+                            1
+                            if fields[key] in (True, 1, "1", "true", "on")
+                            else 0
+                        )
                 sets = ", ".join(f"{k} = ?" for k in fields)
                 vals = list(fields.values()) + [cid]
                 conn.execute(
@@ -507,6 +669,79 @@ class Handler(BaseHTTPRequestHandler):
                         except Exception as exc:  # noqa: BLE001
                             hot = {"ok": False, "error": str(exc)}
                 self._send(200, {"ok": True, "caption_hot": hot})
+                return
+
+            if path.startswith("/v1/egress/") and path.endswith("/config"):
+                eid = int(path.split("/")[3])
+                row = conn.execute(
+                    "SELECT id FROM egress_channels WHERE id = ?", (eid,)
+                ).fetchone()
+                if not row:
+                    self._send(404, {"ok": False, "error": "egress channel not found"})
+                    return
+                allowed = {
+                    "name",
+                    "output_type",
+                    "srt_mode",
+                    "srt_remote_host",
+                    "srt_remote_port",
+                    "srt_listen_port",
+                    "hls_mode",
+                    "hls_push_url",
+                    "target_bitrate_kbps",
+                    "enabled",
+                }
+                fields = {k: body[k] for k in allowed if k in body}
+                if not fields:
+                    self._send(400, {"ok": False, "error": "no updatable fields"})
+                    return
+                if "output_type" in fields and fields["output_type"] not in ("srt", "hls"):
+                    self._send(400, {"ok": False, "error": "output_type must be srt or hls"})
+                    return
+                if "srt_mode" in fields and fields["srt_mode"] not in (
+                    None,
+                    "",
+                    "caller",
+                    "listener",
+                    "rendezvous",
+                ):
+                    self._send(400, {"ok": False, "error": "invalid srt_mode"})
+                    return
+                if "hls_mode" in fields and fields["hls_mode"] not in (
+                    None,
+                    "",
+                    "origin_pull",
+                    "push_put",
+                ):
+                    self._send(400, {"ok": False, "error": "invalid hls_mode"})
+                    return
+                # Normalize empty strings to NULL for optional host/url fields.
+                for key in ("srt_remote_host", "hls_push_url", "srt_mode", "hls_mode"):
+                    if key in fields and fields[key] == "":
+                        fields[key] = None
+                for key in ("srt_remote_port", "srt_listen_port", "target_bitrate_kbps"):
+                    if key in fields and fields[key] in ("", None):
+                        fields[key] = None
+                    elif key in fields:
+                        fields[key] = int(fields[key])
+                if "enabled" in fields:
+                    fields["enabled"] = 1 if fields["enabled"] in (True, 1, "1", "true", "on") else 0
+                sets = ", ".join(f"{k} = ?" for k in fields)
+                vals = list(fields.values()) + [eid]
+                conn.execute(
+                    f"UPDATE egress_channels SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    vals,
+                )
+                conn.commit()
+                audit(
+                    conn,
+                    event_type="config_change",
+                    egress_channel_id=eid,
+                    source_ip=self.client_address[0],
+                    result="success",
+                    detail=json.dumps(fields),
+                )
+                self._send(200, {"ok": True, "restart_hint": f"nexbreak-egress@{eid}"})
                 return
 
             if path.startswith("/v1/processing/") and path.endswith("/captioning"):
