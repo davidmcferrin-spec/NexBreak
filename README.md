@@ -122,6 +122,25 @@ sudo -u nexbreak python3 /opt/nexbreak/bin/nexbreak-proc \
 Apache site: `config/apache-nexbreak.conf` (installed as `nexbreak.conf`).
 Open `http://<host>/` for the UI.
 
+### Troubleshooting: "controller unreachable" / API 500
+
+1. On the Ubuntu box:
+   ```bash
+   systemctl status nexbreak-controller
+   curl -sS http://127.0.0.1:8787/v1/health
+   ```
+2. From your workstation browser open `http://<host>/api/diag.php` —
+   it reports PHP curl/`allow_url_fopen` and whether the controller answers.
+3. Ensure `php-curl` is installed and `mod_rewrite` is enabled:
+   ```bash
+   sudo apt-get install -y php-curl
+   sudo a2enmod rewrite
+   sudo systemctl reload apache2
+   ```
+4. Redeploy `web/api/.htaccess` + `web/api/index.php` (a bad nested rewrite
+   to `api/api/index.php` was a common cause of HTTP 500).
+
+
 ### Packages
 
 | Tool | Role |

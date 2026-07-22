@@ -6,7 +6,11 @@
   async function load() {
     var res = await api.get("/v1/dashboard");
     if (!res.ok || !res.data || !res.data.ok) {
-      statusEl.textContent = "Controller unreachable at " + (window.NEXBREAK_API || "") + " — start nexbreak-controller.";
+      var detail =
+        (res.data && (res.data.error || res.data.message)) ||
+        ("HTTP " + res.status);
+      statusEl.textContent =
+        "API error: " + detail + " — check /api/diag.php and nexbreak-controller.";
       statusEl.style.color = "var(--bad)";
       return;
     }

@@ -1,8 +1,9 @@
-# Route /api/* to the PHP proxy (Apache + mod_rewrite).
+# Inside /api/: send non-files to this directory's index.php (not api/index.php —
+# that path is relative to DocumentRoot and becomes /api/api/index.php → 500).
 DirectoryIndex index.php
 
 <IfModule mod_rewrite.c>
   RewriteEngine On
   RewriteCond %{REQUEST_FILENAME} !-f
-  RewriteRule ^ api/index.php [L,QSA]
+  RewriteRule ^ index.php [L,QSA]
 </IfModule>
