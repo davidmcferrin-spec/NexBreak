@@ -11,8 +11,10 @@ Stdlib only; external tools invoked as subprocesses.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlparse
 
 
 def which(name: str) -> Optional[str]:
@@ -46,6 +48,37 @@ def require_bins(*names: str) -> dict[str, str]:
     return found
 
 
+def parse_srt_url(url: str) -> dict[str, Any]:
+    """
+    Parse srt://host:port[?mode=caller|listener|rendezvous] into fields.
+    Returns empty dict if not an SRT URL.
+    """
+    raw = (url or "").strip()
+    if not raw.lower().startswith("srt://"):
+        return {}
+    # urlparse needs a normal netloc; libsrt URLs are fine as-is.
+    u = urlparse(raw)
+    host = u.hostname
+    port = u.port
+    qs = parse_qs(u.query)
+    mode = None
+    if "mode" in qs and qs["mode"]:
+        mode = qs["mode"][0].lower()
+    out: dict[str, Any] = {}
+    if mode in ("caller", "listener", "rendezvous"):
+        out["srt_mode"] = mode
+    if mode == "listener" and port:
+        out["srt_listen_port"] = int(port)
+    elif host and port:
+        out["srt_remote_host"] = host
+        out["srt_remote_port"] = int(port)
+    elif port and not host:
+        # srt://:9004 or srt://0.0.0.0:9004 without hostname edge cases
+        out["srt_listen_port"] = int(port)
+        out.setdefault("srt_mode", "listener")
+    return out
+
+
 def build_input_url(channel: dict[str, Any]) -> str:
     """Resolve ffmpeg -i URL from a processing_channels row."""
     kind = channel["input_type"]
@@ -53,18 +86,40 @@ def build_input_url(channel: dict[str, Any]) -> str:
         url = (channel.get("rtsp_url") or "").strip()
         if not url:
             raise ValueError("rtsp_url is required for input_type=rtsp")
+        if url.lower().startswith("srt://"):
+            raise ValueError(
+                "rtsp_url is an srt:// URL but input_type=rtsp — "
+                "set input_type=srt and fill SRT host/port (or paste the URL after switching)"
+            )
+        if not re.match(r"^rtsp[su]?://", url, re.I):
+            raise ValueError(
+                f"rtsp_url must be an rtsp:// URL (got {url[:48]!r})"
+            )
         return url
     if kind == "srt":
-        mode = channel.get("srt_mode") or "caller"
-        if mode == "listener":
-            port = channel.get("srt_listen_port")
-            if not port:
-                raise ValueError("srt_listen_port required for srt listener input")
-            return f"srt://0.0.0.0:{int(port)}?mode=listener&latency=200"
+        mode = (channel.get("srt_mode") or "caller").lower()
         host = channel.get("srt_remote_host")
         port = channel.get("srt_remote_port")
+        listen = channel.get("srt_listen_port")
+        # Recover from UI type-switch: SRT URL left in rtsp_url.
+        if (mode == "listener" and not listen) or (
+            mode != "listener" and (not host or not port)
+        ):
+            parsed = parse_srt_url(channel.get("rtsp_url") or "")
+            if parsed:
+                mode = (parsed.get("srt_mode") or mode).lower()
+                host = host or parsed.get("srt_remote_host")
+                port = port or parsed.get("srt_remote_port")
+                listen = listen or parsed.get("srt_listen_port")
+        if mode == "listener":
+            if not listen:
+                raise ValueError("srt_listen_port required for srt listener input")
+            return f"srt://0.0.0.0:{int(listen)}?mode=listener&latency=200"
         if not host or not port:
-            raise ValueError("srt_remote_host/port required for srt caller/rendezvous input")
+            raise ValueError(
+                "srt_remote_host/port required for srt caller/rendezvous input "
+                "(set them in Channels, or paste srt://host:port)"
+            )
         if mode == "rendezvous":
             return f"srt://{host}:{int(port)}?mode=rendezvous&latency=200"
         return f"srt://{host}:{int(port)}?mode=caller&latency=200"
@@ -81,7 +136,7 @@ def build_input_url(channel: dict[str, Any]) -> str:
 def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
     """
     ffmpeg argv that writes MPEG-TS to stdout (piped into tsp).
-    RTSP client_pull uses low-latency live flags; transport from rtsp_transport.
+    RTSP options are applied only for input_type=rtsp (never for srt://).
     """
     url = build_input_url(channel)
     kind = channel["input_type"]
@@ -185,6 +240,10 @@ def tsp_splice_argv(
     """
     tsp chain: stuffing → PMT SCTE declare → spliceinject → drop nulls → UDP feed.
     Reads MPEG-TS from stdin (-I file -).
+
+    TSDuck 3.4x requires --service OR (--pid AND --pts-pid). Using --service -
+    selects the first PAT service so PTS/PCR PIDs are taken from that PMT
+    (works for live remux without hardcoding a video PID).
     """
     scte_pid = int(channel.get("scte35_pid") or 500)
     return [
@@ -192,10 +251,11 @@ def tsp_splice_argv(
         "--add-input-stuffing", "1/10",
         "-I", "file", "-",
         "-P", "pmt",
+        "--service", "-",
         "--add-programinfo-id", "0x43554549",
         "--add-pid", f"{scte_pid}/0x86",
         "-P", "spliceinject",
-        "--pid", str(scte_pid),
+        "--service", "-",
         "--udp", f"127.0.0.1:{splice_udp_port}",
         "--inject-count", "2",
         "--inject-interval", "800",

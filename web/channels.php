@@ -61,6 +61,9 @@ require __DIR__ . '/include/header.php';
         <option value="rendezvous">Rendezvous</option>
       </select>
     </label>
+    <label class="proc-srt">Paste srt:// URL
+      <input id="p-srt_paste" placeholder="srt://10.68.183.33:9004" autocomplete="off">
+    </label>
     <label class="proc-srt proc-srt-remote">Remote host <input id="p-srt_remote_host" placeholder="10.0.0.50"></label>
     <label class="proc-srt proc-srt-remote">Remote port <input type="number" id="p-srt_remote_port" min="1" max="65535"></label>
     <label class="proc-srt proc-srt-listen">Listen port <input type="number" id="p-srt_listen_port" min="1" max="65535"></label>

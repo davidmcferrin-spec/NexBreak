@@ -164,6 +164,30 @@
     el.className = "panel-meta" + (failed ? " bad" : running === total && total ? " ok" : "");
   }
 
+  function applySrtUrlToFields(url) {
+    var m = String(url || "").trim().match(
+      /^srt:\/\/([^:/?]+):(\d+)(?:\?([^#]*))?/i
+    );
+    if (!m) return false;
+    var host = m[1];
+    var port = m[2];
+    var qs = m[3] || "";
+    var modeMatch = qs.match(/(?:^|&)mode=(caller|listener|rendezvous)(?:&|$)/i);
+    var mode = modeMatch ? modeMatch[1].toLowerCase() : "caller";
+    document.getElementById("p-input_type").value = "srt";
+    document.getElementById("p-srt_mode").value = mode;
+    if (mode === "listener") {
+      document.getElementById("p-srt_listen_port").value = port;
+      document.getElementById("p-srt_remote_host").value = "";
+      document.getElementById("p-srt_remote_port").value = "";
+    } else {
+      document.getElementById("p-srt_remote_host").value = host;
+      document.getElementById("p-srt_remote_port").value = port;
+    }
+    syncProcFields();
+    return true;
+  }
+
   function syncProcFields() {
     var type = document.getElementById("p-input_type").value;
     var srtMode = document.getElementById("p-srt_mode").value;
@@ -311,6 +335,20 @@
   document.getElementById("p-input_type").addEventListener("change", syncProcFields);
   document.getElementById("p-srt_mode").addEventListener("change", syncProcFields);
   document.getElementById("p-rtsp_role").addEventListener("change", syncProcFields);
+  document.getElementById("p-rtsp_url").addEventListener("change", function () {
+    var v = document.getElementById("p-rtsp_url").value;
+    if (/^srt:\/\//i.test(v)) {
+      applySrtUrlToFields(v);
+      api.toast("Detected srt:// URL — switched input type to SRT", "info");
+    }
+  });
+  document.getElementById("p-srt_paste").addEventListener("change", function () {
+    var v = document.getElementById("p-srt_paste").value;
+    if (applySrtUrlToFields(v)) {
+      document.getElementById("p-srt_paste").value = "";
+      api.toast("Parsed SRT URL into host/port fields", "info");
+    }
+  });
   document.getElementById("e-output_type").addEventListener("change", syncEgrFields);
   document.getElementById("e-srt_mode").addEventListener("change", syncEgrFields);
   document.getElementById("e-hls_mode").addEventListener("change", syncEgrFields);
@@ -318,11 +356,17 @@
   document.getElementById("btn-proc-save").addEventListener("click", async function () {
     var id = document.getElementById("p-id").value;
     var inputType = document.getElementById("p-input_type").value;
+    var rtspUrl = document.getElementById("p-rtsp_url").value || null;
+    // Paste of srt:// into the URL box (or leftover after type switch)
+    if (rtspUrl && /^srt:\/\//i.test(rtspUrl)) {
+      applySrtUrlToFields(rtspUrl);
+      inputType = "srt";
+    }
     var body = {
       name: document.getElementById("p-name").value,
       input_type: inputType,
       rtsp_role: document.getElementById("p-rtsp_role").value,
-      rtsp_url: document.getElementById("p-rtsp_url").value || null,
+      rtsp_url: inputType === "rtsp" ? rtspUrl : null,
       rtsp_transport: document.getElementById("p-rtsp_transport").value,
       srt_mode: document.getElementById("p-srt_mode").value,
       srt_remote_host: document.getElementById("p-srt_remote_host").value || null,
@@ -344,9 +388,6 @@
       captioning_enabled: Number(document.getElementById("p-captioning").value),
       enabled: Number(document.getElementById("p-enabled").value),
     };
-    if (inputType !== "rtsp") {
-      body.rtsp_url = null;
-    }
     if (inputType !== "srt") {
       body.srt_mode = null;
       body.srt_remote_host = null;
@@ -355,6 +396,10 @@
     }
     if (inputType !== "decklink") {
       body.decklink_device_index = null;
+    }
+    if (inputType === "srt" && !body.srt_remote_host && !body.srt_listen_port) {
+      api.toast("SRT caller needs remote host/port (or listener needs listen port)", "error");
+      return;
     }
     var res = await api.post("/v1/processing/" + id + "/config", body);
     if (!res.ok || !res.data || !res.data.ok) {
