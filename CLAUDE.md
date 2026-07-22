@@ -34,6 +34,10 @@ inputs and outputs. DeckLink SDI-out is architected for but deferred past v1.
   - Shared phonetic lexicon library (accuracy): feeds the ASR engine's
     pronunciation dictionary to improve recognition before transcription,
     not a post-hoc correction pass.
+  - **Per-stream hot bypass:** `captioning_enabled=0` (UI / API) stops the
+    Vosk worker for that stream only and leaves the MPEG-TS path untouched.
+    Captioning is a non-fatal sidecar — crash or stop never restarts or
+    kills `nexbreak-proc` ingest/splice. Other channels are unaffected.
 - Software stream router: each input's processed feed (post-splice,
   post-caption) is decoupled from any specific output. The routing table
   assigns processed feeds to egress adapters — not fixed 1-in/1-out.
@@ -154,13 +158,15 @@ Done:
 - `nexbreak-controller` REST API; splice fan-out via `/run/nexbreak/proc-*.sock`
 - `nexbreak-proc`: ffmpeg RTSP/SRT ingest → tsp spliceinject → UDP feed
   + MediaMTX RTSP preview publisher (WHEP)
+  + caption/Vosk sidecar (hot on/off bypass; never fatal to core pipeline)
 - `nexbreak-egress`: UDP local feed → SRT (ffmpeg)
-- `web/` UI: Dashboard, Roll (with live preview), Preview, Channels, Router,
-  Captions, Audit; `/api` PHP proxy to controller
+- `web/` UI: Dashboard, Roll (with live preview + CC toggle), Preview,
+  Channels, Router, Captions (per-stream bypass + lexicon/blacklist), Audit;
+  `/api` PHP proxy to controller
 
 Next:
 - Hardware bring-up of channel 1 against a real RTSP source
+- Caption audio tap + CEA-608/708 insert into the local feed
 - Privileged helper for systemctl (leaning Unix-socket helper over sudoers)
-- Caption ASR (Vosk) using splice pre-roll as headroom
 - HLS egress mode
 - TLS on MediaMTX when UI is HTTPS (same NexVUE pattern)

@@ -72,7 +72,10 @@ require __DIR__ . '/include/header.php';
       </select>
     </label>
   </form>
-  <p class="warn-banner" style="margin-top:10px">After changing RTSP URL or preview settings, restart <code>nexbreak-proc@N</code> to apply.</p>
+  <p class="warn-banner" style="margin-top:10px">
+    Captioning on/off is applied live (stops/starts Vosk only — no proc restart).
+    RTSP URL / feed / preview path changes still need <code>nexbreak-proc@N</code> restart.
+  </p>
   <div class="bar" style="margin-top:12px">
     <button type="button" class="primary" id="btn-save">Save</button>
     <button type="button" id="btn-cancel">Cancel</button>

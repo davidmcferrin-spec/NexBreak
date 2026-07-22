@@ -27,10 +27,12 @@ $target = nexbreak_api_base() . $path . ($query ? ('?' . $query) : '');
 $headers = "Accept: application/json\r\n";
 $body = null;
 if (in_array($method, ['POST', 'PUT', 'PATCH'], true)) {
-    $body = file_get_contents('php://input');
+    $rawBody = file_get_contents('php://input');
+    // Use === false so a body of "0" is not treated as empty (PHP falsy string).
+    $body = ($rawBody === false) ? '' : $rawBody;
     $ct = $_SERVER['CONTENT_TYPE'] ?? 'application/json';
     $headers .= 'Content-Type: ' . $ct . "\r\n";
-    $headers .= 'Content-Length: ' . strlen($body ?: '') . "\r\n";
+    $headers .= 'Content-Length: ' . strlen($body) . "\r\n";
 }
 if (!empty($_SERVER['HTTP_AUTHORIZATION'])) {
     $headers .= 'Authorization: ' . $_SERVER['HTTP_AUTHORIZATION'] . "\r\n";

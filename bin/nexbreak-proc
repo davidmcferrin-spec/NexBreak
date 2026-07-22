@@ -33,6 +33,7 @@ from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from nexbreak_captions import CaptionSidecar  # noqa: E402
 from nexbreak_db import (  # noqa: E402
     audit,
     connect,
@@ -56,10 +57,12 @@ _stop = False
 _event_id = 1
 _channel: dict[str, Any] = {}
 _splice_udp = 0
-_procs: list[Popen] = []          # [ffmpeg_ingest, tsp, ...]
+_procs: list[Popen] = []          # [ffmpeg_ingest, tsp] ONLY — never captions
 _preview: Optional[Popen] = None  # non-fatal sidecar
 _preview_argv: list[str] = []
 _preview_restart_at = 0.0
+_captions: Optional[CaptionSidecar] = None
+_db_path: Optional[str] = None
 
 
 def _handle_signal(signum, _frame):
@@ -69,7 +72,10 @@ def _handle_signal(signum, _frame):
 
 
 def _kill_pipeline() -> None:
-    global _preview
+    global _preview, _captions
+    if _captions is not None:
+        _captions.shutdown()
+        _captions = None
     for p in reversed(_procs):
         if p.poll() is None:
             p.terminate()
@@ -87,6 +93,16 @@ def _kill_pipeline() -> None:
                 p.kill()
     _procs.clear()
     _preview = None
+
+
+def _start_captions(channel: dict[str, Any]) -> None:
+    """Start caption sidecar only when captioning_enabled — never fatal."""
+    global _captions
+    _captions = CaptionSidecar(channel, db_path=_db_path)
+    want = bool(int(channel.get("captioning_enabled") or 0))
+    _captions.set_enabled(want)
+    if not want:
+        log.info("captions bypassed at start (captioning_enabled=0)")
 
 
 def _start_preview(channel: dict[str, Any], ffmpeg: str) -> None:
@@ -183,6 +199,9 @@ class _ControlHandler(socketserver.StreamRequestHandler):
             self._reply({"ok": True, "service": _channel.get("service_name")})
             return
         if cmd == "status":
+            cap = _captions.status() if _captions else {
+                "desired": False, "running": False, "bypassed": True
+            }
             self._reply(
                 {
                     "ok": True,
@@ -193,8 +212,24 @@ class _ControlHandler(socketserver.StreamRequestHandler):
                     "preview_path": preview_path_for(_channel) if _channel else None,
                     "preview_alive": _preview is not None and _preview.poll() is None,
                     "pipeline_alive": all(p.poll() is None for p in _procs) if _procs else False,
+                    "captions": cap,
                 }
             )
+            return
+        if cmd == "caption_set":
+            # Hot toggle — stops/starts Vosk without touching ingest/splice.
+            if _captions is None:
+                self._reply({"ok": False, "error": "caption sidecar not initialized"})
+                return
+            enabled = bool(req.get("enabled"))
+            result = _captions.set_enabled(enabled)
+            self._reply(result)
+            return
+        if cmd == "caption_status":
+            if _captions is None:
+                self._reply({"ok": True, "desired": False, "running": False, "bypassed": True})
+                return
+            self._reply({"ok": True, **_captions.status()})
             return
         if cmd == "splice":
             try:
@@ -256,6 +291,10 @@ def _start_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
         _start_preview(channel, bins["ffmpeg"])
     except Exception as exc:  # noqa: BLE001
         log.warning("preview publisher failed to start (non-fatal): %s", exc)
+    try:
+        _start_captions(channel)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("caption sidecar failed to start (non-fatal): %s", exc)
 
 
 def _watch_pipeline() -> Optional[int]:
@@ -265,11 +304,13 @@ def _watch_pipeline() -> Optional[int]:
         if code is not None:
             return code
     _ensure_preview()
+    if _captions is not None:
+        _captions.tick()
     return None
 
 
 def main() -> int:
-    global _channel, _splice_udp, _stop
+    global _channel, _splice_udp, _stop, _db_path
 
     parser = argparse.ArgumentParser(description="NexBreak processing channel")
     parser.add_argument("--service-name", required=True)
@@ -289,119 +330,122 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    _db_path = args.db
     conn = connect(args.db)
-    migrate(conn)
-    channel = get_processing_by_service(conn, args.service_name)
-    if channel is None:
-        log.error("no processing_channels row for service_name=%r", args.service_name)
-        return 1
-    if not channel["enabled"]:
-        log.warning("channel %s disabled — exiting", channel["name"])
-        return 0
+    try:
+        migrate(conn)
+        channel = get_processing_by_service(conn, args.service_name)
+        if channel is None:
+            log.error("no processing_channels row for service_name=%r", args.service_name)
+            return 1
+        if not channel["enabled"]:
+            log.warning("channel %s disabled — exiting", channel["name"])
+            return 0
 
-    _channel = channel
-    _splice_udp = splice_udp_port_for(channel)
-    sock_path = control_sock_path(args.service_name)
-    ppath = preview_path_for(channel)
+        _channel = channel
+        _splice_udp = splice_udp_port_for(channel)
+        sock_path = control_sock_path(args.service_name)
+        ppath = preview_path_for(channel)
 
-    log.info(
-        "plan: %s type=%s delay_ms=%s feed=%s:%s splice_udp=%s preview=%s sock=%s",
-        channel["name"],
-        channel["input_type"],
-        channel["splice_insertion_delay_ms"],
-        channel["local_feed_host"],
-        channel["local_feed_port"],
-        _splice_udp,
-        ppath if int(channel.get("preview_enabled") if channel.get("preview_enabled") is not None else 1) else "off",
-        sock_path,
-    )
-
-    if args.once or args.dry_run:
-        bins = require_bins("ffmpeg", "tsp")
-        print("FFMPEG", " ".join(ffmpeg_ingest_argv(channel, bins["ffmpeg"])))
-        print(
-            "TSP",
-            " ".join(
-                tsp_splice_argv(
-                    channel,
-                    bins["tsp"],
-                    splice_udp_port=_splice_udp,
-                    feed_host=channel["local_feed_host"],
-                    feed_port=int(channel["local_feed_port"]),
-                )
-            ),
+        log.info(
+            "plan: %s type=%s delay_ms=%s feed=%s:%s splice_udp=%s preview=%s sock=%s",
+            channel["name"],
+            channel["input_type"],
+            channel["splice_insertion_delay_ms"],
+            channel["local_feed_host"],
+            channel["local_feed_port"],
+            _splice_udp,
+            ppath if int(channel.get("preview_enabled") if channel.get("preview_enabled") is not None else 1) else "off",
+            sock_path,
         )
-        if int(channel.get("preview_enabled") if channel.get("preview_enabled") is not None else 1):
+
+        if args.once or args.dry_run:
+            bins = require_bins("ffmpeg", "tsp")
+            print("FFMPEG", " ".join(ffmpeg_ingest_argv(channel, bins["ffmpeg"])))
             print(
-                "PREVIEW",
+                "TSP",
                 " ".join(
-                    ffmpeg_preview_argv(
-                        ffmpeg=bins["ffmpeg"],
-                        feed_host=channel["local_feed_host"] or "127.0.0.1",
+                    tsp_splice_argv(
+                        channel,
+                        bins["tsp"],
+                        splice_udp_port=_splice_udp,
+                        feed_host=channel["local_feed_host"],
                         feed_port=int(channel["local_feed_port"]),
-                        preview_path=ppath,
                     )
                 ),
             )
-        return 0
+            if int(channel.get("preview_enabled") if channel.get("preview_enabled") is not None else 1):
+                print(
+                    "PREVIEW",
+                    " ".join(
+                        ffmpeg_preview_argv(
+                            ffmpeg=bins["ffmpeg"],
+                            feed_host=channel["local_feed_host"] or "127.0.0.1",
+                            feed_port=int(channel["local_feed_port"]),
+                            preview_path=ppath,
+                        )
+                    ),
+                )
+            return 0
 
-    server = _start_control_server(sock_path)
-    try:
-        _start_pipeline(channel, _splice_udp)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("failed to start pipeline: %s", exc)
-        audit(
-            conn,
-            event_type="service_crash",
-            processing_channel_id=channel["id"],
-            result="failure",
-            detail=str(exc),
-        )
-        server.shutdown()
-        return 1
-
-    audit(
-        conn,
-        event_type="service_start",
-        processing_channel_id=channel["id"],
-        detail=(
-            f"nexbreak-proc@{args.service_name} pipeline up; "
-            f"feed {channel['local_feed_host']}:{channel['local_feed_port']}; "
-            f"splice_udp {_splice_udp}; preview {ppath}"
-        ),
-    )
-
-    rc = 0
-    while not _stop:
-        dead = _watch_pipeline()
-        if dead is not None:
-            log.error("pipeline child exited code=%s — stopping", dead)
+        server = _start_control_server(sock_path)
+        try:
+            _start_pipeline(channel, _splice_udp)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("failed to start pipeline: %s", exc)
             audit(
                 conn,
                 event_type="service_crash",
                 processing_channel_id=channel["id"],
                 result="failure",
-                detail=f"pipeline child exited {dead}",
+                detail=str(exc),
             )
-            rc = 1
-            break
-        time.sleep(0.5)
+            server.shutdown()
+            return 1
 
-    _kill_pipeline()
-    server.shutdown()
-    try:
-        os.unlink(sock_path)
-    except OSError:
-        pass
+        audit(
+            conn,
+            event_type="service_start",
+            processing_channel_id=channel["id"],
+            detail=(
+                f"nexbreak-proc@{args.service_name} pipeline up; "
+                f"feed {channel['local_feed_host']}:{channel['local_feed_port']}; "
+                f"splice_udp {_splice_udp}; preview {ppath}"
+            ),
+        )
 
-    audit(
-        conn,
-        event_type="service_stop",
-        processing_channel_id=channel["id"],
-        detail=f"nexbreak-proc@{args.service_name} stopped",
-    )
-    conn.close()
-    return rc
+        rc = 0
+        while not _stop:
+            dead = _watch_pipeline()
+            if dead is not None:
+                log.error("pipeline child exited code=%s — stopping", dead)
+                audit(
+                    conn,
+                    event_type="service_crash",
+                    processing_channel_id=channel["id"],
+                    result="failure",
+                    detail=f"pipeline child exited {dead}",
+                )
+                rc = 1
+                break
+            time.sleep(0.5)
+
+        _kill_pipeline()
+        server.shutdown()
+        try:
+            os.unlink(sock_path)
+        except OSError:
+            pass
+
+        audit(
+            conn,
+            event_type="service_stop",
+            processing_channel_id=channel["id"],
+            detail=f"nexbreak-proc@{args.service_name} stopped",
+        )
+        return rc
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

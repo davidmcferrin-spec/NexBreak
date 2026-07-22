@@ -8,9 +8,19 @@ require __DIR__ . '/include/header.php';
 <div class="page-header">
   <div>
     <h1>Captions</h1>
-    <p class="sub">Shared phonetic lexicon (accuracy) and blacklist (compliance)</p>
+    <p class="sub">Shared lexicon/blacklist · per-stream ASR on/off (Vosk bypass)</p>
   </div>
+  <button type="button" id="btn-refresh-channels">Refresh channels</button>
 </div>
+
+<section class="panel">
+  <h2>Per-stream captioning</h2>
+  <p class="warn-banner" style="margin-bottom:10px">
+    Off = bypass: Vosk process stopped for that stream only. Ingest, splice, preview, and
+    other channels are untouched. Toggle is hot — no <code>nexbreak-proc</code> restart.
+  </p>
+  <div id="cap-channels"><div class="empty">Loading…</div></div>
+</section>
 
 <section class="two-col">
   <div class="panel">

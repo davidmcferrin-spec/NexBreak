@@ -57,10 +57,13 @@ cmd_install() {
   # www-data needs to reach the controller HTTP port only (loopback)
   usermod -aG nexbreak www-data || true
   chmod 0755 "$PREFIX"/bin/nexbreak-*
-  install -m 644 "$PREFIX"/systemd/nexbreak-controller.service /etc/systemd/system/
-  install -m 644 "$PREFIX"/systemd/nexbreak-proc@.service /etc/systemd/system/
-  install -m 644 "$PREFIX"/systemd/nexbreak-egress@.service /etc/systemd/system/
-  install -m 644 "$PREFIX"/systemd/nexbreak-mediamtx.service /etc/systemd/system/
+  # Substitute PREFIX/DATA into unit files (templates ship with /opt and /var/lib defaults)
+  for unit in nexbreak-controller.service nexbreak-proc@.service nexbreak-egress@.service nexbreak-mediamtx.service; do
+    sed -e "s|/opt/nexbreak|${PREFIX}|g" \
+        -e "s|/var/lib/nexbreak|${DATA}|g" \
+        "$PREFIX/systemd/$unit" > "/etc/systemd/system/$unit"
+    chmod 644 "/etc/systemd/system/$unit"
+  done
   mkdir -p /etc/nexbreak
   install -m 644 "$PREFIX"/config/mediamtx.yml /etc/nexbreak/mediamtx.yml
   if [[ -f "$PREFIX"/config/apache-nexbreak.conf ]]; then
@@ -71,7 +74,7 @@ cmd_install() {
   fi
   systemctl daemon-reload
   systemctl reload apache2 || true
-  echo "Installed under $PREFIX (DocumentRoot $PREFIX/web)"
+  echo "Installed under $PREFIX (DocumentRoot $PREFIX/web, DB $DATA)"
 }
 
 cmd_init_db() {

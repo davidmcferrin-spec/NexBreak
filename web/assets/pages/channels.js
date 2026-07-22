@@ -106,7 +106,13 @@
       api.toast((res.data && res.data.error) || "Save failed", "error");
       return;
     }
-    api.toast("Channel saved — restart nexbreak-proc@" + id + " to apply", "success");
+    api.toast(
+      "Channel saved" +
+        (body.captioning_enabled !== undefined
+          ? " · captions hot-applied"
+          : " — restart nexbreak-proc@" + id + " if ingest settings changed"),
+      "success"
+    );
     editor.hidden = true;
     load();
   });

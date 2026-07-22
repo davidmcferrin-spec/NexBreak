@@ -43,3 +43,16 @@ def send_splice(
         body["event_id"] = event_id
     # Allow delay_ms up to ~channel delay + inject overhead
     return proc_request(sock_path, body, timeout=timeout)
+
+
+def send_caption_set(sock_path: str, *, enabled: bool, timeout: float = 15.0) -> dict[str, Any]:
+    """Hot-enable or bypass captions / unload Vosk on a running proc."""
+    return proc_request(
+        sock_path,
+        {"cmd": "caption_set", "enabled": bool(enabled)},
+        timeout=timeout,
+    )
+
+
+def send_caption_status(sock_path: str, timeout: float = 5.0) -> dict[str, Any]:
+    return proc_request(sock_path, {"cmd": "caption_status"}, timeout=timeout)

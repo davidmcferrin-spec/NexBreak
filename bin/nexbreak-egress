@@ -77,92 +77,94 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
 
     conn = connect(args.db)
-    channel = get_egress_by_service(conn, args.service_name)
-    if channel is None:
-        log.error("no egress_channels row for service_name=%r", args.service_name)
-        return 1
-    if not channel["enabled"]:
-        log.warning("egress %s disabled — exiting", channel["name"])
-        return 0
-
-    source = _routed_source(conn, channel["id"])
-    if source is None:
-        log.error("egress %s has no routing assignment — configure router first", channel["name"])
-        return 1
-
-    feed_host = source["local_feed_host"] or "127.0.0.1"
-    feed_port = int(source["local_feed_port"])
-    log.info(
-        "plan: %s type=%s ← %s (%s:%s) srt_mode=%s",
-        channel["name"],
-        channel["output_type"],
-        source["name"],
-        feed_host,
-        feed_port,
-        channel.get("srt_mode"),
-    )
-
-    if args.once or args.dry_run:
-        bins = require_bins("ffmpeg")
-        argv = ffmpeg_egress_argv(
-            ffmpeg=bins["ffmpeg"],
-            feed_host=feed_host,
-            feed_port=feed_port,
-            egress=channel,
-        )
-        print("FFMPEG", " ".join(argv))
-        return 0
-
     try:
-        bins = require_bins("ffmpeg")
-        argv = ffmpeg_egress_argv(
-            ffmpeg=bins["ffmpeg"],
-            feed_host=feed_host,
-            feed_port=feed_port,
-            egress=channel,
+        channel = get_egress_by_service(conn, args.service_name)
+        if channel is None:
+            log.error("no egress_channels row for service_name=%r", args.service_name)
+            return 1
+        if not channel["enabled"]:
+            log.warning("egress %s disabled — exiting", channel["name"])
+            return 0
+
+        source = _routed_source(conn, channel["id"])
+        if source is None:
+            log.error("egress %s has no routing assignment — configure router first", channel["name"])
+            return 1
+
+        feed_host = source["local_feed_host"] or "127.0.0.1"
+        feed_port = int(source["local_feed_port"])
+        log.info(
+            "plan: %s type=%s ← %s (%s:%s) srt_mode=%s",
+            channel["name"],
+            channel["output_type"],
+            source["name"],
+            feed_host,
+            feed_port,
+            channel.get("srt_mode"),
         )
-    except Exception as exc:  # noqa: BLE001
-        log.error("egress config error: %s", exc)
-        return 1
 
-    log.info("ffmpeg: %s", " ".join(argv))
-    _proc = Popen(argv)
-
-    audit(
-        conn,
-        event_type="service_start",
-        egress_channel_id=channel["id"],
-        processing_channel_id=source["id"],
-        detail=(
-            f"nexbreak-egress@{args.service_name} up; "
-            f"udp://{feed_host}:{feed_port} → {channel['output_type']}"
-        ),
-    )
-
-    rc = 0
-    while not _stop:
-        if _proc.poll() is not None:
-            log.error("ffmpeg exited code=%s", _proc.returncode)
-            audit(
-                conn,
-                event_type="service_crash",
-                egress_channel_id=channel["id"],
-                result="failure",
-                detail=f"ffmpeg exited {_proc.returncode}",
+        if args.once or args.dry_run:
+            bins = require_bins("ffmpeg")
+            argv = ffmpeg_egress_argv(
+                ffmpeg=bins["ffmpeg"],
+                feed_host=feed_host,
+                feed_port=feed_port,
+                egress=channel,
             )
-            rc = 1
-            break
-        time.sleep(0.5)
+            print("FFMPEG", " ".join(argv))
+            return 0
 
-    _kill()
-    audit(
-        conn,
-        event_type="service_stop",
-        egress_channel_id=channel["id"],
-        detail=f"nexbreak-egress@{args.service_name} stopped",
-    )
-    conn.close()
-    return rc
+        try:
+            bins = require_bins("ffmpeg")
+            argv = ffmpeg_egress_argv(
+                ffmpeg=bins["ffmpeg"],
+                feed_host=feed_host,
+                feed_port=feed_port,
+                egress=channel,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("egress config error: %s", exc)
+            return 1
+
+        log.info("ffmpeg: %s", " ".join(argv))
+        _proc = Popen(argv)
+
+        audit(
+            conn,
+            event_type="service_start",
+            egress_channel_id=channel["id"],
+            processing_channel_id=source["id"],
+            detail=(
+                f"nexbreak-egress@{args.service_name} up; "
+                f"udp://{feed_host}:{feed_port} → {channel['output_type']}"
+            ),
+        )
+
+        rc = 0
+        while not _stop:
+            if _proc.poll() is not None:
+                log.error("ffmpeg exited code=%s", _proc.returncode)
+                audit(
+                    conn,
+                    event_type="service_crash",
+                    egress_channel_id=channel["id"],
+                    result="failure",
+                    detail=f"ffmpeg exited {_proc.returncode}",
+                )
+                rc = 1
+                break
+            time.sleep(0.5)
+
+        _kill()
+        audit(
+            conn,
+            event_type="service_stop",
+            egress_channel_id=channel["id"],
+            detail=f"nexbreak-egress@{args.service_name} stopped",
+        )
+        return rc
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

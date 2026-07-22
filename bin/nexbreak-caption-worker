@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""
+nexbreak-caption-worker — per-stream ASR process (Vosk when available).
+
+Runs as a child of nexbreak-proc. Killing/stopping this process must never
+affect ingest, spliceinject, egress, or preview.
+
+Behavior:
+- If NEXBREAK_VOSK_MODEL / --model points at a Vosk model dir AND the vosk
+  module is importable, load it and idle on the audio tap (full CEA insert
+  lands in a follow-on milestone).
+- Otherwise stay alive in bypass-ready idle so enable/disable can be tested
+  without pulling Vosk onto the box yet.
+
+Stdlib preferred; vosk is optional and only imported when a model is set.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import signal
+import sys
+import time
+
+log = logging.getLogger("nexbreak-caption-worker")
+_stop = False
+
+
+def _handle(signum, _frame):
+    global _stop
+    log.info("signal %s — clean exit (captions only)", signum)
+    _stop = True
+
+
+def try_load_vosk(model_path: str):
+    """Return (model, reason). model is None when bypassing ASR."""
+    if not model_path:
+        return None, "no model path — idle bypass-ready"
+    if not os.path.isdir(model_path):
+        return None, f"model path missing: {model_path}"
+    try:
+        from vosk import Model  # type: ignore
+    except ImportError:
+        return None, "vosk package not installed — idle bypass-ready"
+    try:
+        model = Model(model_path)
+        return model, f"vosk model loaded from {model_path}"
+    except Exception as exc:  # noqa: BLE001
+        return None, f"vosk load failed: {exc}"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="NexBreak caption/Vosk worker")
+    parser.add_argument("--service-name", required=True)
+    parser.add_argument("--feed-host", default="127.0.0.1")
+    parser.add_argument("--feed-port", type=int, required=True)
+    parser.add_argument("--db", default=None)
+    parser.add_argument("--model", default=os.environ.get("NEXBREAK_VOSK_MODEL", ""))
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+    signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGTERM, _handle)
+
+    model, reason = try_load_vosk(args.model or "")
+    log.info(
+        "caption worker up service=%s feed=%s:%s — %s",
+        args.service_name,
+        args.feed_host,
+        args.feed_port,
+        reason,
+    )
+    if model is None:
+        # Stay alive so the parent can manage us; no audio decode, no CPU burn.
+        while not _stop:
+            time.sleep(0.5)
+        log.info("caption worker exit (bypass idle)")
+        return 0
+
+    # Model loaded: keep process alive. Audio tap + CEA insert come next;
+    # until then we hold the model so enable=on means "Vosk is warm" and
+    # enable=off (parent SIGTERM) unloads it cleanly.
+    log.info("vosk warm — waiting for audio-tap+insert wiring; SIGTERM unloads")
+    while not _stop:
+        time.sleep(0.5)
+
+    # Drop reference so the model can be GC'd / unmapped
+    del model
+    log.info("caption worker exit (vosk unloaded)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

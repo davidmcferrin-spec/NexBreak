@@ -79,6 +79,29 @@ sudo ufw allow 8189 comment 'NexBreak WebRTC media'
 
 Set a real RTSP URL on Channels → Input 1, restart `nexbreak-proc@1`, open Preview.
 
+### Captioning / Vosk bypass (per stream)
+
+Captions run as an **isolated sidecar** of `nexbreak-proc@N` — never in the
+fatal ffmpeg|tsp watch set.
+
+| Action | Effect |
+|---|---|
+| Off / bypass | Vosk worker SIGTERM'd; model unloaded; no ASR CPU |
+| On | Worker starts for that stream only |
+| Worker crash | Auto-restart with backoff; **ingest/splice keep running** |
+
+```bash
+# Hot toggle (no service restart):
+curl -X POST http://127.0.0.1:8787/v1/processing/1/captioning \
+  -H 'Content-Type: application/json' -d '{"enabled":0}'
+
+# Or Roll UI → CC ON/OFF, or Captions page → per-stream table
+```
+
+Optional model path: `NEXBREAK_VOSK_MODEL=/path/to/vosk-model` on the proc
+unit. Without it the worker idles in bypass-ready mode so enable/disable
+can still be validated.
+
 ## Ubuntu bring-up
 
 ```bash

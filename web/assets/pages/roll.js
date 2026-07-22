@@ -125,6 +125,37 @@
         });
         bar.appendChild(b);
       });
+
+      var capOn = Number(ch.captioning_enabled) === 1;
+      var capBtn = document.createElement("button");
+      capBtn.type = "button";
+      capBtn.textContent = capOn ? "CC ON" : "CC OFF";
+      capBtn.className = capOn ? "primary" : "";
+      capBtn.title = "Toggle closed captioning / Vosk for this stream only";
+      capBtn.addEventListener("click", async function () {
+        var next = !capOn;
+        capBtn.disabled = true;
+        var res = await api.post("/v1/processing/" + ch.id + "/captioning", {
+          enabled: next ? 1 : 0,
+        });
+        capBtn.disabled = false;
+        if (!res.ok || !res.data || !res.data.ok) {
+          api.toast((res.data && res.data.error) || "Caption toggle failed", "error");
+          return;
+        }
+        capOn = next;
+        capBtn.textContent = capOn ? "CC ON" : "CC OFF";
+        capBtn.className = capOn ? "primary" : "";
+        var rt = res.data.runtime || {};
+        api.toast(
+          capOn
+            ? "Captions on · Vosk " + (rt.running ? "running" : "starting")
+            : "Captions bypassed · Vosk stopped",
+          "success"
+        );
+      });
+      bar.appendChild(capBtn);
+
       grid.appendChild(card);
     });
   }
