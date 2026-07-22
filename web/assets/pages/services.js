@@ -181,6 +181,28 @@
   document.getElementById("clear-log").addEventListener("click", function () {
     logEl.textContent = "";
     lastLine = "";
+    sinceCursor = "";
+  });
+  document.getElementById("vacuum-journal").addEventListener("click", async function () {
+    if (
+      !confirm(
+        "Vacuum the systemd journal on this host?\n\n" +
+          "This rotates and deletes old journal data for ALL units (not just NexBreak).\n" +
+          "Use after fixing a crash loop to clear spam."
+      )
+    ) {
+      return;
+    }
+    try {
+      await api("journal_clear", {});
+      logEl.textContent = "";
+      lastLine = "";
+      sinceCursor = "";
+      statusEl.textContent = "journal vacuumed (host-wide)";
+      if (selected) pollJournal(true);
+    } catch (err) {
+      statusEl.textContent = "vacuum error: " + err.message;
+    }
   });
   restartBtn.addEventListener("click", async function () {
     if (!selected) return;

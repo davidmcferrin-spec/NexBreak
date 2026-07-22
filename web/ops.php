@@ -5,7 +5,7 @@
  * Phase 1 LAN-trust: no auth. Privileged work goes through allowlisted sudo
  * wrappers only (see config/nexbreak-ops.sudoers).
  *
- * Actions: services | journal | restart | restart_channels | set_enabled | set_running
+ * Actions: services | journal | journal_clear | restart | restart_channels | set_enabled | set_running
  */
 declare(strict_types=1);
 
@@ -198,6 +198,20 @@ if ($action === 'journal') {
         fail(500, trim($r['stderr']) !== '' ? trim($r['stderr']) : 'journalctl failed');
     }
     echo json_encode(['ok' => true, 'unit' => $unit, 'log' => $r['stdout']]);
+    exit;
+}
+
+if ($action === 'journal_clear') {
+    // Rotates + vacuums the whole host journal (systemd has no per-unit delete).
+    $r = sudo_run(['/usr/local/bin/nexbreak-ops-journal-clear.sh']);
+    if ($r['code'] !== 0) {
+        fail(500, trim($r['stderr']) !== '' ? trim($r['stderr']) : 'journal clear failed');
+    }
+    echo json_encode([
+        'ok' => true,
+        'detail' => 'journal rotated and vacuumed (host-wide)',
+        'stdout' => $r['stdout'],
+    ]);
     exit;
 }
 

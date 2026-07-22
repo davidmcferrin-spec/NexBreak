@@ -391,6 +391,30 @@ def main() -> int:
         server = _start_control_server(sock_path)
         try:
             _start_pipeline(channel, _splice_udp)
+        except ValueError as exc:
+            # Bad channel config — do not exit/restart-loop (spam journal).
+            # Stay idle until operator fixes Channels and restarts the unit.
+            log.error("failed to start pipeline (config): %s", exc)
+            audit(
+                conn,
+                event_type="service_crash",
+                processing_channel_id=channel["id"],
+                result="failure",
+                detail=f"config: {exc}",
+            )
+            log.error(
+                "holding idle (systemd will not restart-loop) — "
+                "fix input settings in Channels, then: systemctl restart nexbreak-proc@%s",
+                args.service_name,
+            )
+            while not _stop:
+                time.sleep(1.0)
+            server.shutdown()
+            try:
+                os.unlink(sock_path)
+            except OSError:
+                pass
+            return 0
         except Exception as exc:  # noqa: BLE001
             log.exception("failed to start pipeline: %s", exc)
             audit(

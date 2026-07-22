@@ -132,7 +132,7 @@ cmd_install() {
     a2ensite nexbreak || true
   fi
   # Services page: allowlisted sudo wrappers for www-data (NexVUE pattern)
-  for s in nexbreak-ops-status.sh nexbreak-ops-journal.sh nexbreak-ops-restart.sh nexbreak-ops-enable.sh; do
+  for s in nexbreak-ops-status.sh nexbreak-ops-journal.sh nexbreak-ops-journal-clear.sh nexbreak-ops-restart.sh nexbreak-ops-enable.sh; do
     install -m 755 "$PREFIX/scripts/ops/$s" "/usr/local/bin/$s"
   done
   if [[ -f "$PREFIX"/config/nexbreak-ops.sudoers ]]; then
