@@ -29,9 +29,16 @@ CREATE TABLE processing_channels (
     video_codec             TEXT,
     audio_codec             TEXT,
     target_bitrate_kbps     INTEGER,
+    -- copy = remux when possible; transcode = force H.264/AAC via ffmpeg
+    ingest_mode             TEXT NOT NULL DEFAULT 'copy'
+                            CHECK (ingest_mode IN ('copy','transcode')),
 
     -- Splice behavior
     splice_insertion_delay_ms INTEGER NOT NULL DEFAULT 0,
+    -- SCTE-35 PID declared in the PMT (stream type 0x86)
+    scte35_pid              INTEGER NOT NULL DEFAULT 500,
+    -- UDP port tsp spliceinject listens on (loopback). NULL = local_feed_port + 1000
+    splice_udp_port         INTEGER,
 
     -- Captioning
     captioning_enabled      BOOLEAN NOT NULL DEFAULT 0,

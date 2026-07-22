@@ -1,0 +1,27 @@
+# Runtime / local state
+data/*.sqlite
+data/*.sqlite-*
+var/
+*.log
+
+# Secrets / local env
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+*.code-workspace
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Uploads / thumbnails
+web/uploads/
+storage/

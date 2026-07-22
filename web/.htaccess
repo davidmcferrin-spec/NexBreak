@@ -1,0 +1,14 @@
+# Point Apache DocumentRoot at this web/ directory.
+# sudo a2enmod rewrite headers
+DirectoryIndex index.php
+
+<IfModule mod_headers.c>
+  Header set X-Content-Type-Options "nosniff"
+  Header set X-Frame-Options "SAMEORIGIN"
+</IfModule>
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  # Same-origin API: /api/v1/... → web/api/index.php (PHP → controller)
+  RewriteRule ^api(?:/.*)?$ api/index.php [L,QSA]
+</IfModule>

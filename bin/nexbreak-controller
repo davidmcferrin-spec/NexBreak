@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+"""
+nexbreak-controller — HTTP control API + SQLite owner.
+
+Serves REST for the web UI, Streamdeck, and DNF panel. stdlib only.
+Default bind: 127.0.0.1:8787 (Apache/PHP reverse-proxies or same-origin fetch).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, Optional
+from urllib.parse import parse_qs, urlparse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from nexbreak_db import (  # noqa: E402
+    audit,
+    connect,
+    control_sock_path,
+    init_schema,
+    migrate,
+    row_to_dict,
+    rows_to_dicts,
+)
+from nexbreak_control import send_splice  # noqa: E402
+
+
+log = logging.getLogger("nexbreak-controller")
+DB_PATH: Optional[str] = None
+
+
+def db():
+    return connect(DB_PATH)
+
+
+def seed_demo(conn) -> None:
+    """Create four demo processing + egress channels if the tables are empty."""
+    n = conn.execute("SELECT COUNT(*) AS c FROM processing_channels").fetchone()["c"]
+    if n:
+        return
+    for i in range(1, 5):
+        conn.execute(
+            """
+            INSERT INTO processing_channels (
+                name, service_name, input_type, rtsp_role, rtsp_url,
+                video_codec, audio_codec, target_bitrate_kbps,
+                splice_insertion_delay_ms, captioning_enabled,
+                local_feed_host, local_feed_port, enabled
+            ) VALUES (?, ?, 'rtsp', 'client_pull', ?, 'h264', 'aac', 14000, 2000, 0, '127.0.0.1', ?, 1)
+            """,
+            (f"Input {i}", str(i), f"rtsp://source.example/ch{i}", 19000 + i),
+        )
+        conn.execute(
+            """
+            INSERT INTO egress_channels (
+                name, service_name, output_type, srt_mode, srt_listen_port,
+                target_bitrate_kbps, enabled
+            ) VALUES (?, ?, 'srt', 'listener', ?, 14000, 1)
+            """,
+            (f"Output {i}", str(i), 9000 + i),
+        )
+    # Default 1:1 routing
+    for i in range(1, 5):
+        conn.execute(
+            "INSERT INTO routing_assignments (processing_channel_id, egress_channel_id) VALUES (?, ?)",
+            (i, i),
+        )
+    conn.commit()
+    log.info("seeded demo processing/egress channels 1–4 with 1:1 routing")
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "NexBreakController/0.1"
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        log.info("%s - " + fmt, self.address_string(), *args)
+
+    def _send(self, code: int, body: Any, content_type: str = "application/json") -> None:
+        raw = body if isinstance(body, (bytes, bytearray)) else json.dumps(body).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _read_json(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        if not raw:
+            return {}
+        return json.loads(raw.decode("utf-8"))
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self._send(204, b"")
+
+    def do_GET(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        qs = parse_qs(urlparse(self.path).query)
+
+        if path in ("/", "/health", "/v1/health"):
+            self._send(200, {"ok": True, "service": "nexbreak-controller"})
+            return
+
+        conn = db()
+        try:
+            if path == "/v1/processing":
+                rows = conn.execute(
+                    "SELECT * FROM processing_channels ORDER BY id"
+                ).fetchall()
+                self._send(200, {"ok": True, "channels": rows_to_dicts(rows)})
+                return
+
+            if path.startswith("/v1/processing/") and path.count("/") == 3:
+                cid = int(path.rsplit("/", 1)[-1])
+                row = conn.execute(
+                    "SELECT * FROM processing_channels WHERE id = ?", (cid,)
+                ).fetchone()
+                if not row:
+                    self._send(404, {"ok": False, "error": "not found"})
+                    return
+                self._send(200, {"ok": True, "channel": row_to_dict(row)})
+                return
+
+            if path == "/v1/egress":
+                rows = conn.execute("SELECT * FROM egress_channels ORDER BY id").fetchall()
+                self._send(200, {"ok": True, "channels": rows_to_dicts(rows)})
+                return
+
+            if path == "/v1/routing":
+                rows = conn.execute(
+                    """
+                    SELECT ra.id, ra.processing_channel_id, ra.egress_channel_id, ra.assigned_at,
+                           pc.name AS processing_name, ec.name AS egress_name
+                    FROM routing_assignments ra
+                    JOIN processing_channels pc ON pc.id = ra.processing_channel_id
+                    JOIN egress_channels ec ON ec.id = ra.egress_channel_id
+                    ORDER BY ec.id
+                    """
+                ).fetchall()
+                self._send(200, {"ok": True, "assignments": rows_to_dicts(rows)})
+                return
+
+            if path == "/v1/audit":
+                limit = int((qs.get("limit") or ["50"])[0])
+                limit = max(1, min(limit, 500))
+                rows = conn.execute(
+                    """
+                    SELECT ae.*, pc.name AS processing_name, ec.name AS egress_name,
+                           cc.label AS credential_label
+                    FROM audit_events ae
+                    LEFT JOIN processing_channels pc ON pc.id = ae.processing_channel_id
+                    LEFT JOIN egress_channels ec ON ec.id = ae.egress_channel_id
+                    LEFT JOIN control_credentials cc ON cc.id = ae.triggered_by_credential_id
+                    ORDER BY ae.occurred_at DESC, ae.id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                self._send(200, {"ok": True, "events": rows_to_dicts(rows)})
+                return
+
+            if path == "/v1/captions/lexicon":
+                rows = conn.execute(
+                    "SELECT * FROM caption_lexicon ORDER BY word COLLATE NOCASE"
+                ).fetchall()
+                self._send(200, {"ok": True, "entries": rows_to_dicts(rows)})
+                return
+
+            if path == "/v1/captions/blacklist":
+                rows = conn.execute(
+                    "SELECT * FROM caption_blacklist ORDER BY word COLLATE NOCASE"
+                ).fetchall()
+                self._send(200, {"ok": True, "entries": rows_to_dicts(rows)})
+                return
+
+            if path == "/v1/dashboard":
+                proc = conn.execute(
+                    "SELECT COUNT(*) AS c FROM processing_channels WHERE enabled = 1"
+                ).fetchone()["c"]
+                egr = conn.execute(
+                    "SELECT COUNT(*) AS c FROM egress_channels WHERE enabled = 1"
+                ).fetchone()["c"]
+                routes = conn.execute(
+                    "SELECT COUNT(*) AS c FROM routing_assignments"
+                ).fetchone()["c"]
+                splices = conn.execute(
+                    "SELECT COUNT(*) AS c FROM audit_events WHERE event_type = 'splice_command'"
+                ).fetchone()["c"]
+                recent = conn.execute(
+                    """
+                    SELECT ae.*, pc.name AS processing_name
+                    FROM audit_events ae
+                    LEFT JOIN processing_channels pc ON pc.id = ae.processing_channel_id
+                    ORDER BY ae.occurred_at DESC, ae.id DESC
+                    LIMIT 12
+                    """
+                ).fetchall()
+                self._send(
+                    200,
+                    {
+                        "ok": True,
+                        "stats": {
+                            "processing_enabled": proc,
+                            "egress_enabled": egr,
+                            "routes": routes,
+                            "splice_events": splices,
+                        },
+                        "recent": rows_to_dicts(recent),
+                    },
+                )
+                return
+
+            self._send(404, {"ok": False, "error": f"unknown path {path}"})
+        finally:
+            conn.close()
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        body = self._read_json()
+        conn = db()
+        try:
+            if path == "/v1/splice":
+                # Panel / Streamdeck / roll-button entry point.
+                channel_id = int(body.get("processing_channel_id") or 0)
+                splice_type = body.get("splice_type") or "splice_start_immediate"
+                hex_payload = body.get("hex_payload")
+                row = conn.execute(
+                    "SELECT * FROM processing_channels WHERE id = ?", (channel_id,)
+                ).fetchone()
+                if not row:
+                    self._send(404, {"ok": False, "error": "processing channel not found"})
+                    return
+                channel = row_to_dict(row)
+                assert channel is not None
+                sock = control_sock_path(channel["service_name"])
+                delay_ms = int(channel["splice_insertion_delay_ms"] or 0)
+                # Cancel is fast; start/end may sleep delay_ms inside the proc.
+                timeout = max(30.0, delay_ms / 1000.0 + 15.0)
+                try:
+                    result = send_splice(
+                        sock,
+                        splice_type=splice_type,
+                        hex_payload=hex_payload,
+                        timeout=timeout,
+                    )
+                except FileNotFoundError:
+                    eid = audit(
+                        conn,
+                        event_type="splice_command",
+                        processing_channel_id=channel_id,
+                        splice_type=splice_type,
+                        splice_hex_payload=hex_payload,
+                        source_ip=self.client_address[0],
+                        result="failure",
+                        detail=f"proc socket missing: {sock}",
+                    )
+                    self._send(
+                        503,
+                        {
+                            "ok": False,
+                            "audit_id": eid,
+                            "error": f"processing service not running ({sock})",
+                        },
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    eid = audit(
+                        conn,
+                        event_type="splice_command",
+                        processing_channel_id=channel_id,
+                        splice_type=splice_type,
+                        splice_hex_payload=hex_payload,
+                        source_ip=self.client_address[0],
+                        result="failure",
+                        detail=str(exc),
+                    )
+                    self._send(
+                        502,
+                        {"ok": False, "audit_id": eid, "error": str(exc)},
+                    )
+                    return
+
+                ok = bool(result.get("ok"))
+                eid = audit(
+                    conn,
+                    event_type="splice_command",
+                    processing_channel_id=channel_id,
+                    splice_type=splice_type,
+                    splice_hex_payload=hex_payload,
+                    source_ip=self.client_address[0],
+                    result="success" if ok else "failure",
+                    detail=result.get("detail") or result.get("error"),
+                )
+                self._send(
+                    202 if ok else 502,
+                    {
+                        "ok": ok,
+                        "audit_id": eid,
+                        "delay_ms": result.get("delay_ms", delay_ms),
+                        "event_id": result.get("event_id"),
+                        "message": result.get("detail") or result.get("error"),
+                    },
+                )
+                return
+
+            if path == "/v1/routing":
+                proc_id = int(body["processing_channel_id"])
+                egr_id = int(body["egress_channel_id"])
+                conn.execute(
+                    "DELETE FROM routing_assignments WHERE egress_channel_id = ?",
+                    (egr_id,),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO routing_assignments (processing_channel_id, egress_channel_id)
+                    VALUES (?, ?)
+                    """,
+                    (proc_id, egr_id),
+                )
+                conn.commit()
+                audit(
+                    conn,
+                    event_type="routing_change",
+                    processing_channel_id=proc_id,
+                    egress_channel_id=egr_id,
+                    source_ip=self.client_address[0],
+                    result="success",
+                    detail=f"egress {egr_id} ← processing {proc_id}",
+                )
+                self._send(200, {"ok": True})
+                return
+
+            if path == "/v1/captions/lexicon":
+                word = (body.get("word") or "").strip()
+                phonetic = (body.get("phonetic") or "").strip()
+                if not word or not phonetic:
+                    self._send(400, {"ok": False, "error": "word and phonetic required"})
+                    return
+                conn.execute(
+                    "INSERT INTO caption_lexicon (word, phonetic) VALUES (?, ?)",
+                    (word, phonetic),
+                )
+                conn.commit()
+                self._send(201, {"ok": True})
+                return
+
+            if path == "/v1/captions/blacklist":
+                word = (body.get("word") or "").strip()
+                if not word:
+                    self._send(400, {"ok": False, "error": "word required"})
+                    return
+                conn.execute(
+                    "INSERT INTO caption_blacklist (word) VALUES (?)",
+                    (word,),
+                )
+                conn.commit()
+                self._send(201, {"ok": True})
+                return
+
+            if path.startswith("/v1/processing/") and path.endswith("/config"):
+                cid = int(path.split("/")[3])
+                allowed = {
+                    "name",
+                    "input_type",
+                    "srt_mode",
+                    "srt_remote_host",
+                    "srt_remote_port",
+                    "srt_listen_port",
+                    "rtsp_role",
+                    "rtsp_url",
+                    "decklink_device_index",
+                    "video_codec",
+                    "audio_codec",
+                    "target_bitrate_kbps",
+                    "splice_insertion_delay_ms",
+                    "captioning_enabled",
+                    "local_feed_host",
+                    "local_feed_port",
+                    "enabled",
+                }
+                fields = {k: body[k] for k in allowed if k in body}
+                if not fields:
+                    self._send(400, {"ok": False, "error": "no updatable fields"})
+                    return
+                sets = ", ".join(f"{k} = ?" for k in fields)
+                vals = list(fields.values()) + [cid]
+                conn.execute(
+                    f"UPDATE processing_channels SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    vals,
+                )
+                conn.commit()
+                audit(
+                    conn,
+                    event_type="config_change",
+                    processing_channel_id=cid,
+                    source_ip=self.client_address[0],
+                    result="success",
+                    detail=json.dumps(fields),
+                )
+                self._send(200, {"ok": True})
+                return
+
+            self._send(404, {"ok": False, "error": f"unknown path {path}"})
+        except (KeyError, ValueError, TypeError) as exc:
+            self._send(400, {"ok": False, "error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            log.exception("POST %s failed", path)
+            self._send(500, {"ok": False, "error": str(exc)})
+        finally:
+            conn.close()
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        conn = db()
+        try:
+            if path.startswith("/v1/captions/lexicon/"):
+                eid = int(path.rsplit("/", 1)[-1])
+                conn.execute("DELETE FROM caption_lexicon WHERE id = ?", (eid,))
+                conn.commit()
+                self._send(200, {"ok": True})
+                return
+            if path.startswith("/v1/captions/blacklist/"):
+                eid = int(path.rsplit("/", 1)[-1])
+                conn.execute("DELETE FROM caption_blacklist WHERE id = ?", (eid,))
+                conn.commit()
+                self._send(200, {"ok": True})
+                return
+            self._send(404, {"ok": False, "error": f"unknown path {path}"})
+        finally:
+            conn.close()
+
+
+def main() -> int:
+    global DB_PATH
+
+    parser = argparse.ArgumentParser(description="NexBreak controller API")
+    parser.add_argument("--db", default=None)
+    parser.add_argument("--host", default=os.environ.get("NEXBREAK_API_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("NEXBREAK_API_PORT", "8787")))
+    parser.add_argument("--init-db", action="store_true", help="create schema if missing")
+    parser.add_argument("--seed", action="store_true", help="seed demo channels when empty")
+    parser.add_argument(
+        "--init-only",
+        action="store_true",
+        help="apply --init-db/--seed and exit (no HTTP listen)",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+
+    DB_PATH = args.db
+    if DB_PATH is None:
+        # Dev default: repo data/ when /var/lib/nexbreak is unavailable
+        repo_data = Path(__file__).resolve().parent.parent / "data" / "nexbreak.sqlite"
+        if not Path("/var/lib/nexbreak").exists():
+            repo_data.parent.mkdir(parents=True, exist_ok=True)
+            DB_PATH = str(repo_data)
+            log.info("using dev DB %s", DB_PATH)
+
+    need_init = args.init_db or args.init_only or (DB_PATH and not Path(DB_PATH).exists())
+    conn = connect(DB_PATH)
+    if need_init:
+        init_schema(conn)
+        log.info("schema applied to %s", DB_PATH)
+    else:
+        migrate(conn)
+    if args.seed or need_init:
+        seed_demo(conn)
+    conn.close()
+
+    if args.init_only:
+        log.info("init-only complete")
+        return 0
+
+    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    log.info("listening on http://%s:%s  db=%s", args.host, args.port, DB_PATH or "default")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        log.info("shutting down")
+    finally:
+        httpd.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

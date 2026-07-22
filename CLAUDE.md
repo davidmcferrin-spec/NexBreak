@@ -1,7 +1,9 @@
 # NexBreak
 
-Status: architecture locked for v1, implementation starting. This doc is the
-source of truth for design decisions — update it as the build progresses.
+Status: architecture locked for v1; one-channel media path implemented
+(RTSP/SRT → TSDuck SCTE-35 → local UDP feed → SRT). Apache is the only
+supported web front end. This doc is the source of truth for design
+decisions — update it as the build progresses.
 
 ## What this is
 
@@ -142,3 +144,20 @@ below — don't finalize the purchase until those are answered.
 See the plan in the project kickoff notes — schema and service skeleton
 first, one channel end-to-end before replicating to 4, captioning and
 preview layered in after the core signal path is proven.
+
+### Scaffold progress (2026-07-22)
+
+Done:
+- `schema/nexbreak.sql` + migrations (`scte35_pid`, `splice_udp_port`, `ingest_mode`)
+- systemd units + `scripts/install-ubuntu.sh` + Apache vhost
+- `nexbreak-controller` REST API; splice fan-out via `/run/nexbreak/proc-*.sock`
+- `nexbreak-proc`: ffmpeg → tsp (PMT + spliceinject) → UDP local feed
+- `nexbreak-egress`: UDP local feed → SRT (ffmpeg)
+- `web/` UI (Apache DocumentRoot); `/api` PHP proxy to controller
+
+Next:
+- Hardware bring-up of channel 1 against a real RTSP source
+- WebRTC preview (NexVUE/MediaMTX patterns)
+- Privileged helper for systemctl (leaning Unix-socket helper over sudoers)
+- Caption ASR (Vosk) using splice pre-roll as headroom
+- HLS egress mode

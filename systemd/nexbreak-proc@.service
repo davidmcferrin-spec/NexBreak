@@ -7,19 +7,18 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=/opt/nexbreak/bin/nexbreak-proc --service-name %i --db /var/lib/nexbreak/nexbreak.sqlite
+ExecStart=/usr/bin/python3 /opt/nexbreak/bin/nexbreak-proc --service-name %i --db /var/lib/nexbreak/nexbreak.sqlite
 Restart=on-failure
 RestartSec=2
 User=nexbreak
 Group=nexbreak
-
-# Each instance (nexbreak-proc@1, @2, @3, @4) is its own process group.
-# A crash or manual restart of one instance never touches the others,
-# and never touches any nexbreak-egress@ instance.
+RuntimeDirectory=nexbreak
+RuntimeDirectoryMode=0770
+Environment=NEXBREAK_RUN_DIR=/run/nexbreak
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/nexbreak /var/log/nexbreak
+ReadWritePaths=/var/lib/nexbreak /var/log/nexbreak /run/nexbreak
 LimitNOFILE=65536
 
 [Install]

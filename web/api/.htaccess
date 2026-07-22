@@ -1,0 +1,8 @@
+# Route /api/* to the PHP proxy (Apache + mod_rewrite).
+DirectoryIndex index.php
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteRule ^ api/index.php [L,QSA]
+</IfModule>

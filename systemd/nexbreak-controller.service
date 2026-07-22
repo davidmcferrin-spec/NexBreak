@@ -1,0 +1,22 @@
+[Unit]
+Description=NexBreak controller (config API + routing + audit)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/nexbreak/bin/nexbreak-controller --db /var/lib/nexbreak/nexbreak.sqlite --host 127.0.0.1 --port 8787
+Restart=on-failure
+RestartSec=2
+User=nexbreak
+Group=nexbreak
+Environment=NEXBREAK_RUN_DIR=/run/nexbreak
+# Connect to /run/nexbreak/proc-*.sock (created by nexbreak-proc@ instances)
+ReadWritePaths=/var/lib/nexbreak /var/log/nexbreak /run/nexbreak
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -7,7 +7,7 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=/opt/nexbreak/bin/nexbreak-egress --service-name %i --db /var/lib/nexbreak/nexbreak.sqlite
+ExecStart=/usr/bin/python3 /opt/nexbreak/bin/nexbreak-egress --service-name %i --db /var/lib/nexbreak/nexbreak.sqlite
 Restart=on-failure
 RestartSec=2
 User=nexbreak
