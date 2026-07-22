@@ -74,10 +74,18 @@
         try {
           ev.receiver.jitterBufferTarget = 0;
         } catch (e) {}
-        if (videoEl && !videoEl.srcObject) {
-          videoEl.srcObject = ev.streams[0];
-          videoEl.play().catch(function () {});
+        if (!videoEl) return;
+        // Video and audio often arrive as separate ontrack events; merge into one MediaStream
+        // so unmute actually has an audio track (common WHEP/MediaMTX pitfall).
+        var stream = videoEl.srcObject;
+        if (!(stream instanceof MediaStream)) {
+          stream = ev.streams && ev.streams[0] ? ev.streams[0] : new MediaStream();
+          videoEl.srcObject = stream;
         }
+        if (ev.track && stream.getTracks().indexOf(ev.track) === -1) {
+          stream.addTrack(ev.track);
+        }
+        videoEl.play().catch(function () {});
       };
       pc.onconnectionstatechange = function () {
         if (!pc) return;

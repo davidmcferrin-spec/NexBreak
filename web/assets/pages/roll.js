@@ -2,14 +2,25 @@
 (function () {
   var api = window.NexBreakAPI;
   var whep = window.NexBreakWHEP;
+  var cc = window.NexBreakCC;
   var grid = document.getElementById("roll-grid");
+  var btnCc = document.getElementById("btn-cc");
   var players = [];
+  var ccClients = [];
+  var captionsOn = cc ? cc.getPref() : false;
 
   var SPLICE_TYPES = [
     { value: "splice_start_immediate", label: "ROLL" },
     { value: "splice_end_immediate", label: "END" },
     { value: "splice_cancel", label: "CANCEL" },
   ];
+
+  function syncCcButton() {
+    if (!btnCc) return;
+    btnCc.textContent = captionsOn ? "CC ON" : "CC";
+    btnCc.className = captionsOn ? "primary" : "";
+    btnCc.setAttribute("aria-pressed", captionsOn ? "true" : "false");
+  }
 
   function teardown() {
     players.forEach(function (p) {
@@ -18,6 +29,12 @@
       } catch (e) {}
     });
     players = [];
+    ccClients.forEach(function (c) {
+      try {
+        c.close();
+      } catch (e) {}
+    });
+    ccClients = [];
   }
 
   async function fire(channelId, spliceType, btn) {
@@ -79,6 +96,7 @@
 
       var card = document.createElement("div");
       card.className = "channel-card";
+      card.dataset.path = path;
       card.innerHTML =
         '<div class="title"><strong>' +
         api.esc(ch.name) +
@@ -87,7 +105,9 @@
         "</span></div>" +
         '<div class="preview-slot">' +
         (previewOn
-          ? '<video playsinline autoplay muted></video><div class="preview-state muted">idle</div>'
+          ? '<video playsinline autoplay muted></video>' +
+            '<div class="pane-cc" hidden aria-live="polite"></div>' +
+            '<div class="preview-state muted">idle</div>'
           : '<div class="muted">Preview off</div>') +
         "</div>" +
         '<div class="muted">Delay ' +
@@ -99,6 +119,7 @@
       if (previewOn) {
         var video = card.querySelector("video");
         var stateEl = card.querySelector(".preview-state");
+        var ccEl = card.querySelector(".pane-cc");
         var player = whep.create(video, {
           path: path,
           whepPort: whepPort,
@@ -111,6 +132,20 @@
         });
         players.push(player);
         player.connect();
+
+        video.addEventListener("click", function () {
+          video.muted = !video.muted;
+          if (!video.muted) video.play().catch(function () {});
+        });
+        video.title = "Click to mute/unmute";
+
+        if (cc) {
+          var client = cc.connect(function (cue) {
+            cc.renderOverlay(ccEl, cue, captionsOn);
+          });
+          client.setPath(path);
+          ccClients.push(client);
+        }
       }
 
       var bar = card.querySelector(".bar");
@@ -126,37 +161,67 @@
         bar.appendChild(b);
       });
 
-      var capOn = Number(ch.captioning_enabled) === 1;
-      var capBtn = document.createElement("button");
-      capBtn.type = "button";
-      capBtn.textContent = capOn ? "CC ON" : "CC OFF";
-      capBtn.className = capOn ? "primary" : "";
-      capBtn.title = "Toggle closed captioning / Vosk for this stream only";
-      capBtn.addEventListener("click", async function () {
-        var next = !capOn;
-        capBtn.disabled = true;
+      var asrOn = Number(ch.captioning_enabled) === 1;
+      var asrBtn = document.createElement("button");
+      asrBtn.type = "button";
+      asrBtn.textContent = asrOn ? "ASR ON" : "ASR";
+      asrBtn.className = asrOn ? "primary" : "";
+      asrBtn.title = "Toggle live ASR caption generation for this stream (Vosk)";
+      asrBtn.addEventListener("click", async function () {
+        var next = !asrOn;
+        asrBtn.disabled = true;
         var res = await api.post("/v1/processing/" + ch.id + "/captioning", {
           enabled: next ? 1 : 0,
         });
-        capBtn.disabled = false;
+        asrBtn.disabled = false;
         if (!res.ok || !res.data || !res.data.ok) {
           api.toast((res.data && res.data.error) || "Caption toggle failed", "error");
           return;
         }
-        capOn = next;
-        capBtn.textContent = capOn ? "CC ON" : "CC OFF";
-        capBtn.className = capOn ? "primary" : "";
+        asrOn = next;
+        asrBtn.textContent = asrOn ? "ASR ON" : "ASR";
+        asrBtn.className = asrOn ? "primary" : "";
         var rt = res.data.runtime || {};
         api.toast(
-          capOn
-            ? "Captions on · Vosk " + (rt.running ? "running" : "starting")
-            : "Captions bypassed · Vosk stopped",
+          asrOn
+            ? "ASR on · Vosk " + (rt.running ? "running" : "starting")
+            : "ASR bypassed · Vosk stopped",
           "success"
         );
       });
-      bar.appendChild(capBtn);
+      bar.appendChild(asrBtn);
 
       grid.appendChild(card);
+    });
+  }
+
+  if (btnCc && cc) {
+    syncCcButton();
+    btnCc.addEventListener("click", function () {
+      captionsOn = !captionsOn;
+      cc.setPref(captionsOn);
+      syncCcButton();
+      if (!captionsOn) {
+        grid.querySelectorAll(".pane-cc").forEach(function (el) {
+          cc.renderOverlay(el, { clear: true }, false);
+        });
+        return;
+      }
+      ccClients.forEach(function (client) {
+        var path = client.getPath();
+        if (!path) return;
+        fetch("/cc.php?path=" + encodeURIComponent(path) + "&once=1")
+          .then(function (r) {
+            return r.json();
+          })
+          .then(function (data) {
+            if (!data || !data.ok) return;
+            var card = grid.querySelector('.channel-card[data-path="' + path + '"]');
+            if (!card) return;
+            cc.renderOverlay(card.querySelector(".pane-cc"), data, true);
+          })
+          .catch(function () {});
+      });
     });
   }
 

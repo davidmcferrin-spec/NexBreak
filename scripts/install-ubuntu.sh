@@ -90,6 +90,7 @@ cmd_deps() {
     python3 \
     curl \
     rsync
+  apt-get install -y ccextractor || echo "NOTE: ccextractor not available — Preview/Roll CC overlay will be idle"
   install_chrony
   install_tsduck
   # MediaMTX binary (WebRTC WHEP preview)

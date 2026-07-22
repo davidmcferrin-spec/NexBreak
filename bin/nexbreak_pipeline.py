@@ -240,7 +240,7 @@ def ffmpeg_preview_argv(
         "-bufsize", "3000k",
         "-g", "30",
         "-c:a", "libopus",
-        "-b:a", "64k",
+        "-b:a", "96k",
         "-ac", "2",
         "-ar", "48000",
         "-f", "rtsp",

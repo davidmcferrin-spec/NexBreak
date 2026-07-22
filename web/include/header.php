@@ -37,6 +37,7 @@ window.NEXBREAK_WHEP_PORT = 8889;
 </script>
 <script src="<?= htmlspecialchars(nexbreak_asset('/assets/nexbreak-api.js'), ENT_QUOTES, 'UTF-8') ?>"></script>
 <script src="<?= htmlspecialchars(nexbreak_asset('/assets/nexbreak-whep.js'), ENT_QUOTES, 'UTF-8') ?>"></script>
+<script src="<?= htmlspecialchars(nexbreak_asset('/assets/nexbreak-cc.js'), ENT_QUOTES, 'UTF-8') ?>"></script>
 </head>
 <body>
 <nav class="topnav" aria-label="Primary">

@@ -61,6 +61,9 @@ _procs: list[Popen] = []          # [ffmpeg_ingest, tsp] ONLY — never captions
 _preview: Optional[Popen] = None  # non-fatal sidecar
 _preview_argv: list[str] = []
 _preview_restart_at = 0.0
+_cc_watch: Optional[Popen] = None  # non-fatal CEA-608 → UI overlay
+_cc_watch_argv: list[str] = []
+_cc_watch_restart_at = 0.0
 _captions: Optional[CaptionSidecar] = None
 _db_path: Optional[str] = None
 
@@ -72,19 +75,19 @@ def _handle_signal(signum, _frame):
 
 
 def _kill_pipeline() -> None:
-    global _preview, _captions
+    global _preview, _cc_watch, _captions
     if _captions is not None:
         _captions.shutdown()
         _captions = None
     for p in reversed(_procs):
         if p.poll() is None:
             p.terminate()
-    if _preview is not None and _preview.poll() is None:
-        _preview.terminate()
+    for side in (_preview, _cc_watch):
+        if side is not None and side.poll() is None:
+            side.terminate()
     deadline = time.time() + 5
-    for p in list(reversed(_procs)) + ([_preview] if _preview else []):
-        if p is None:
-            continue
+    sides = [p for p in (_preview, _cc_watch) if p is not None]
+    for p in list(reversed(_procs)) + sides:
         if p.poll() is None:
             remaining = max(0.1, deadline - time.time())
             try:
@@ -93,6 +96,7 @@ def _kill_pipeline() -> None:
                 p.kill()
     _procs.clear()
     _preview = None
+    _cc_watch = None
 
 
 def _start_captions(channel: dict[str, Any]) -> None:
@@ -137,6 +141,46 @@ def _ensure_preview() -> None:
     code = _preview.returncode if _preview is not None else "n/a"
     log.warning("preview publisher down (code=%s) — restarting", code)
     _preview = Popen(_preview_argv)
+
+
+def _start_cc_watch(channel: dict[str, Any]) -> None:
+    """Extract embedded captions from the local feed for Preview/Roll overlay."""
+    global _cc_watch, _cc_watch_argv
+    if not int(channel.get("preview_enabled") if channel.get("preview_enabled") is not None else 1):
+        return
+    watch = Path(__file__).resolve().parent / "nexbreak-cc-watch"
+    if not watch.is_file():
+        log.warning("nexbreak-cc-watch missing — CC overlay idle")
+        return
+    path = preview_path_for(channel)
+    _cc_watch_argv = [
+        sys.executable,
+        str(watch),
+        "--preview-path",
+        path,
+        "--feed-host",
+        channel["local_feed_host"] or "127.0.0.1",
+        "--feed-port",
+        str(int(channel["local_feed_port"])),
+    ]
+    log.info("cc-watch: %s", " ".join(_cc_watch_argv))
+    _cc_watch = Popen(_cc_watch_argv)
+
+
+def _ensure_cc_watch() -> None:
+    global _cc_watch, _cc_watch_restart_at
+    if not _cc_watch_argv:
+        return
+    if _cc_watch is not None and _cc_watch.poll() is None:
+        return
+    now = time.time()
+    if now < _cc_watch_restart_at:
+        return
+    _cc_watch_restart_at = now + 5.0
+    code = _cc_watch.returncode if _cc_watch is not None else "n/a"
+    log.warning("cc-watch down (code=%s) — restarting", code)
+    _cc_watch = Popen(_cc_watch_argv)
+
 
 def _send_to_spliceinject(payload: bytes) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -292,6 +336,10 @@ def _start_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
     except Exception as exc:  # noqa: BLE001
         log.warning("preview publisher failed to start (non-fatal): %s", exc)
     try:
+        _start_cc_watch(channel)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cc-watch failed to start (non-fatal): %s", exc)
+    try:
         _start_captions(channel)
     except Exception as exc:  # noqa: BLE001
         log.warning("caption sidecar failed to start (non-fatal): %s", exc)
@@ -304,6 +352,7 @@ def _watch_pipeline() -> Optional[int]:
         if code is not None:
             return code
     _ensure_preview()
+    _ensure_cc_watch()
     if _captions is not None:
         _captions.tick()
     return None

@@ -10,6 +10,9 @@ require __DIR__ . '/include/header.php';
     <h1>Roll</h1>
     <p class="sub">Per-stream SCTE-35 splice control — one channel never touches another</p>
   </div>
+  <div class="bar">
+    <button type="button" id="btn-cc" title="Show closed captions on previews">CC</button>
+  </div>
 </div>
 
 <p class="warn-banner">Live WebRTC preview is post-splice. Roll applies the channel delay, then injects SCTE-35 on that stream only.</p>

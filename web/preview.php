@@ -11,6 +11,7 @@ require __DIR__ . '/include/header.php';
     <p class="sub">Low-latency WebRTC (WHEP) — post-splice processed feed via MediaMTX</p>
   </div>
   <div class="bar">
+    <button type="button" id="btn-cc" title="Show closed captions on previews">CC</button>
     <button type="button" id="btn-refresh">Refresh</button>
     <span class="muted" id="whep-hint"></span>
   </div>

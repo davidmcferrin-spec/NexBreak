@@ -413,12 +413,42 @@ table.data tbody tr:hover { background: var(--row-selected); }
   object-fit: contain;
   background: #000;
   display: block;
+  cursor: pointer;
+}
+
+.pane-cc {
+  position: absolute;
+  left: 8%;
+  right: 8%;
+  bottom: 14%;
+  z-index: 2;
+  max-height: 38%;
+  overflow: hidden;
+  text-align: center;
+  pointer-events: none;
+  font-family: "Segoe UI", "Helvetica Neue", sans-serif;
+  font-size: clamp(13px, 2.4vw, 20px);
+  line-height: 1.25;
+  font-weight: 600;
+  color: #fff;
+  text-shadow:
+    0 0 4px #000,
+    0 1px 2px #000,
+    1px 1px 0 #000,
+    -1px -1px 0 #000;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pane-cc[hidden] {
+  display: none !important;
 }
 
 .preview-state {
   position: absolute;
   left: 8px;
   bottom: 8px;
+  z-index: 3;
   padding: 2px 8px;
   border-radius: 4px;
   background: rgba(0, 0, 0, 0.55);

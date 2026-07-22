@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""
+nexbreak-cc-watch — extract CEA-608 text from the local MPEG-TS feed for UI overlay.
+
+Writes /run/nexbreak/captions/<preview_path>.json (NexVUE-compatible shape) for
+web/cc.php SSE → Preview/Roll overlays. Non-fatal: missing ccextractor just
+idles with an empty clear state.
+
+Prefers `ccextractor` on PATH (text output). Stdlib only otherwise.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+log = logging.getLogger("nexbreak-cc-watch")
+_stop = False
+
+
+def _handle(signum, _frame):
+    global _stop
+    _stop = True
+
+
+def write_state(path: Path, *, text: str, seq: int, clear: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "channel": path.stem,
+        "text": text,
+        "clear": clear or not text,
+        "ts": time.time(),
+        "seq": seq,
+        "service": "CC1",
+    }
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="NexBreak CC watch (preview overlay)")
+    parser.add_argument("--preview-path", required=True, help="MediaMTX path / state key, e.g. nb1")
+    parser.add_argument("--feed-host", default="127.0.0.1")
+    parser.add_argument("--feed-port", type=int, required=True)
+    parser.add_argument(
+        "--state-dir",
+        default=os.environ.get("NEXBREAK_CAPTIONS_DIR", "/run/nexbreak/captions"),
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+    signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGTERM, _handle)
+
+    state_path = Path(args.state_dir) / f"{args.preview_path}.json"
+    write_state(state_path, text="", seq=0, clear=True)
+
+    ccex = shutil.which("ccextractor") or shutil.which("ccextractorlinux")
+    if not ccex:
+        log.warning(
+            "ccextractor not on PATH — CC overlay idle (apt install ccextractor). "
+            "UI toggle still works; no embedded captions to show."
+        )
+        while not _stop:
+            time.sleep(1.0)
+        return 0
+
+    ffmpeg = shutil.which("ffmpeg") or os.environ.get("NEXBREAK_FFMPEG", "ffmpeg")
+    # Share the local UDP feed with preview via SO_REUSEADDR, remux to pipe for ccextractor.
+    src = f"udp://{args.feed_host}:{int(args.feed_port)}?reuse=1&fifo_size=500000&overrun_nonfatal=1"
+    ff_argv = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-nostdin",
+        "-i", src,
+        "-c", "copy",
+        "-f", "mpegts",
+        "pipe:1",
+    ]
+    cc_argv = [
+        ccex,
+        "-",  # stdin
+        "-out=ttxt",
+        "-stdout",
+        "-quiet",
+        "-trim",
+    ]
+    log.info("CC watch: ffmpeg → ccextractor for %s", args.preview_path)
+
+    def spawn():
+        ff = subprocess.Popen(ff_argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        cc = subprocess.Popen(
+            cc_argv,
+            stdin=ff.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+        if ff.stdout is not None:
+            ff.stdout.close()
+        return ff, cc
+
+    seq = 0
+    last = ""
+    last_change = time.time()
+    ff_proc = None
+    cc_proc = None
+    try:
+        ff_proc, cc_proc = spawn()
+        assert cc_proc.stdout is not None
+        while not _stop:
+            if ff_proc.poll() is not None or cc_proc.poll() is not None:
+                log.warning("CC extract chain exited — restarting in 3s")
+                for p in (cc_proc, ff_proc):
+                    try:
+                        if p and p.poll() is None:
+                            p.terminate()
+                    except Exception:  # noqa: BLE001
+                        pass
+                time.sleep(3.0)
+                if _stop:
+                    break
+                ff_proc, cc_proc = spawn()
+                assert cc_proc.stdout is not None
+                continue
+
+            line = cc_proc.stdout.readline()
+            if line == "":
+                time.sleep(0.05)
+                if last and (time.time() - last_change) > 16.0:
+                    last = ""
+                    seq += 1
+                    write_state(state_path, text="", seq=seq, clear=True)
+                continue
+
+            text = line.strip()
+            if not text or text == last:
+                continue
+            last = text
+            last_change = time.time()
+            seq += 1
+            write_state(state_path, text=text, seq=seq, clear=False)
+    finally:
+        for p in (cc_proc, ff_proc):
+            try:
+                if p and p.poll() is None:
+                    p.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        write_state(state_path, text="", seq=seq + 1, clear=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
