@@ -168,18 +168,20 @@ def build_input_url(channel: dict[str, Any]) -> str:
                 host = host or parsed.get("srt_remote_host")
                 port = port or parsed.get("srt_remote_port")
                 listen = listen or parsed.get("srt_listen_port")
+        # Match egress default: 200ms is too tight and shows up as stutter.
+        latency_ms = int(os.environ.get("NEXBREAK_SRT_LATENCY_MS", "800"))
         if mode == "listener":
             if not listen:
                 raise ValueError("srt_listen_port required for srt listener input")
-            return f"srt://0.0.0.0:{int(listen)}?mode=listener&latency=200"
+            return f"srt://0.0.0.0:{int(listen)}?mode=listener&latency={latency_ms}"
         if not host or not port:
             raise ValueError(
                 "srt_remote_host/port required for srt caller/rendezvous input "
                 "(set them in Channels, or paste srt://host:port)"
             )
         if mode == "rendezvous":
-            return f"srt://{host}:{int(port)}?mode=rendezvous&latency=200"
-        return f"srt://{host}:{int(port)}?mode=caller&latency=200"
+            return f"srt://{host}:{int(port)}?mode=rendezvous&latency={latency_ms}"
+        return f"srt://{host}:{int(port)}?mode=caller&latency={latency_ms}"
     if kind == "decklink":
         idx = channel.get("decklink_device_index")
         if idx is None:
@@ -359,14 +361,16 @@ def build_srt_output_url(channel: dict[str, Any]) -> str:
 
     Listener: peeridletimeout + linger=0 so a dropped VLC/client tears down the
     socket and ffmpeg exits (nexbreak-egress restarts it for the next connect).
-    Without that, ffmpeg often hangs mid-write and the port looks open but
-    rejects reconnects until a manual egress restart.
+
+    Latency is intentionally higher than ultra-low (200ms) so VLC playback stays
+    smooth; tlpktdrop is off so we don't intentionally discard for latency.
     """
     mode = channel.get("srt_mode") or "listener"
-    # Shared live-stream flags (ffmpeg libsrt URL query).
-    common = "latency=200&transtype=live&linger=0&tlpktdrop=1"
-    # ~3s without peer activity → connection die → mux I/O error → process exit.
-    idle = "peeridletimeout=3000"
+    # ~800ms receive buffer — smooth for copy remux; still interactive for ops.
+    latency_ms = int(os.environ.get("NEXBREAK_SRT_LATENCY_MS", "800"))
+    common = f"latency={latency_ms}&transtype=live&linger=0"
+    # ~5s without peer → tear down so egress can recycle for the next client.
+    idle = "peeridletimeout=5000"
     if mode == "listener":
         port = channel.get("srt_listen_port")
         if not port:
@@ -392,27 +396,24 @@ def ffmpeg_egress_argv(
     if egress["output_type"] != "srt":
         raise ValueError(f"egress output_type={egress['output_type']} not implemented yet (v1 = srt)")
 
-    src = udp_mpegts_input_url(feed_host, feed_port, fifo_size=1000000)
+    src = udp_mpegts_input_url(feed_host, feed_port, fifo_size=2000000)
     dst = build_srt_output_url(egress)
-    # Probe long enough to learn audio sample_rate / PMT before opening SRT.
-    # analyzeduration=0 caused: "sample rate not set" / "Could not write header".
+    # Modest probe so audio sample_rate is known; avoid ultra-low-delay flags
+    # that encourage stutter on copy→SRT.
     return [
         ffmpeg,
         "-hide_banner",
         "-loglevel", "warning",
         "-nostdin",
         "-fflags", "+genpts+discardcorrupt",
-        "-flags", "low_delay",
-        "-analyzeduration", "5000000",
-        "-probesize", "5000000",
+        "-analyzeduration", "2000000",
+        "-probesize", "2000000",
         "-f", "mpegts",
         "-i", src,
         "-map", "0",
         "-c", "copy",
         "-f", "mpegts",
         "-mpegts_flags", "+resend_headers",
-        "-muxdelay", "0",
-        "-muxpreload", "0",
         dst,
     ]
 

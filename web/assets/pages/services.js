@@ -187,6 +187,31 @@
     follow = !follow;
     followBtn.classList.toggle("active", follow);
   });
+  document.getElementById("copy-log").addEventListener("click", async function () {
+    var text = logEl.textContent || "";
+    if (!text.trim()) {
+      statusEl.textContent = "nothing to copy";
+      return;
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      statusEl.textContent = "journal copied (" + text.length + " chars)";
+    } catch (err) {
+      statusEl.textContent = "copy failed: " + err.message;
+    }
+  });
   document.getElementById("clear-log").addEventListener("click", function () {
     logEl.textContent = "";
     lastLine = "";

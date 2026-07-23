@@ -26,6 +26,7 @@ require __DIR__ . '/include/header.php';
     <h2>Journal</h2>
     <div class="log-bar">
       <button type="button" id="follow" class="active">Follow</button>
+      <button type="button" id="copy-log" title="Copy journal text to clipboard">Copy</button>
       <button type="button" id="clear-log">Clear view</button>
       <button type="button" id="vacuum-journal" title="Rotate and vacuum the host journal (all units)">Vacuum journal…</button>
       <button type="button" id="restart-unit" disabled>Restart unit…</button>

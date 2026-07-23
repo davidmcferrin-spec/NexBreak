@@ -12,9 +12,12 @@ usage() {
 Usage: sudo $0 <command>
 
   deps          Install apt packages (ffmpeg, tsduck, chrony, apache, php)
-  install       Copy tree to $PREFIX, create user/dirs, install units
+  install       Copy tree to $PREFIX, install units, restart running NexBreak services
+  all           Full bring-up / refresh: deps + install + missing vosk/cc-injector + DB
+                (safe to re-run; skips optional pieces that are already present)
   init-db       Create SQLite schema + seed 4 demo channels
   enable        Enable controller + proc@1 + egress@1
+  restart       Restart every active nexbreak-* unit (after code deploy)
   vosk          Download Vosk model + pip package; wire NEXBREAK_VOSK_MODEL
   cc-injector   Build/install Live Caption Encoder (cc_injector) for CEA-608
   status        systemctl status snapshot
@@ -23,7 +26,43 @@ Env overrides: NEXBREAK_PREFIX NEXBREAK_DATA NEXBREAK_LOG
                NEXBREAK_TIMEZONE (default America/New_York)
                NEXBREAK_VOSK_MODEL_DIR  (default /opt/vosk)
                NEXBREAK_VOSK_MODEL_NAME (default vosk-model-small-en-us-0.15)
+               NEXBREAK_SRT_LATENCY_MS  (egress SRT latency; default 800)
 EOF
+}
+
+restart_nexbreak_units() {
+  # Pick up new binaries/units without requiring a manual systemctl dance.
+  systemctl daemon-reload
+  local unit
+  local restarted=0
+  for unit in nexbreak-controller nexbreak-mediamtx; do
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+      echo "Restarting ${unit}…"
+      systemctl restart "$unit"
+      restarted=1
+    fi
+  done
+  # list-units --state=running; also catch activating templates.
+  while IFS= read -r unit; do
+    [[ -z "$unit" ]] && continue
+    echo "Restarting ${unit}…"
+    systemctl restart "$unit"
+    restarted=1
+  done < <(
+    systemctl list-units --type=service --state=running,activating --no-legend \
+      'nexbreak-proc@*' 'nexbreak-egress@*' 2>/dev/null | awk '{print $1}'
+  )
+  if [[ "$restarted" -eq 0 ]]; then
+    echo "No active NexBreak units to restart (run: $0 enable)"
+  else
+    # Give controller a moment, then confirm verify routes are live.
+    sleep 1
+    if curl -fsS http://127.0.0.1:8787/v1/verify/egresses >/dev/null 2>&1; then
+      echo "Controller OK — /v1/verify/egresses reachable"
+    elif curl -fsS http://127.0.0.1:8787/v1/health >/dev/null 2>&1; then
+      echo "WARN: controller up but /v1/verify/egresses failed — check journalctl -u nexbreak-controller" >&2
+    fi
+  fi
 }
 
 install_chrony() {
@@ -156,6 +195,59 @@ cmd_install() {
   systemctl daemon-reload
   systemctl reload apache2 || true
   echo "Installed under $PREFIX (DocumentRoot $PREFIX/web, DB $DATA)"
+  restart_nexbreak_units
+}
+
+need_vosk() {
+  local model_root="${NEXBREAK_VOSK_MODEL_DIR:-/opt/vosk}"
+  local model_name="${NEXBREAK_VOSK_MODEL_NAME:-vosk-model-small-en-us-0.15}"
+  local model_path="${model_root}/${model_name}"
+  [[ -f "$model_path/am/final.mdl" ]] || return 0
+  python3 -c "import vosk" 2>/dev/null || return 0
+  # Drop-in must point at the model for proc units.
+  local drop_in="/etc/systemd/system/nexbreak-proc@.service.d/vosk.conf"
+  [[ -f "$drop_in" ]] || return 0
+  return 1
+}
+
+need_cc_injector() {
+  command -v cc_injector >/dev/null 2>&1 || return 0
+  return 1
+}
+
+cmd_all() {
+  echo "=== deps ==="
+  cmd_deps
+  echo "=== install (rsync + units + restart) ==="
+  cmd_install
+  if need_cc_injector; then
+    echo "=== cc-injector (missing) ==="
+    cmd_cc_injector
+  else
+    echo "=== cc-injector already present: $(command -v cc_injector) ==="
+  fi
+  if need_vosk; then
+    echo "=== vosk (missing model/package/drop-in) ==="
+    cmd_vosk
+  else
+    echo "=== vosk already present — skipping ==="
+  fi
+  if [[ ! -f "$DATA/nexbreak.sqlite" ]]; then
+    echo "=== init-db (no sqlite yet) ==="
+    cmd_init_db
+  else
+    echo "=== DB present: $DATA/nexbreak.sqlite ==="
+  fi
+  # Ensure core units are enabled; start if not already running.
+  systemctl enable nexbreak-mediamtx nexbreak-controller 2>/dev/null || true
+  systemctl start nexbreak-mediamtx nexbreak-controller 2>/dev/null || true
+  echo "=== status ==="
+  cmd_status
+  echo
+  echo "Done. Day-to-day refresh after pulling code:"
+  echo "  sudo $0 install"
+  echo "Full refresh (deps + optional ASR/CC):"
+  echo "  sudo $0 all"
 }
 
 cmd_init_db() {
@@ -298,9 +390,18 @@ cmd_cc_injector() {
   fi
   echo "Installed: $(command -v cc_injector)"
   cc_injector 2>&1 | head -n 3 || true
+  systemctl daemon-reload
+  local unit
+  local restarted=0
+  for unit in $(systemctl list-units --type=service --state=running --no-legend 'nexbreak-proc@*' 2>/dev/null | awk '{print $1}'); do
+    echo "Restarting ${unit}…"
+    systemctl restart "$unit"
+    restarted=1
+  done
+  if [[ "$restarted" -eq 0 ]]; then
+    echo "No running nexbreak-proc@* units — start one after install."
+  fi
   echo
-  echo "Restart processing so asr_insert uses LCE:"
-  echo "  sudo systemctl restart 'nexbreak-proc@*'"
   echo "Confirm: journalctl -u nexbreak-proc@1 -n 40 | grep -iE 'LCE|cc_injector|simple remux'"
 }
 
@@ -309,8 +410,10 @@ main() {
   case "$cmd" in
     deps) cmd_deps ;;
     install) cmd_install ;;
+    all) cmd_all ;;
     init-db) cmd_init_db ;;
     enable) cmd_enable ;;
+    restart) restart_nexbreak_units ;;
     vosk) cmd_vosk ;;
     cc-injector) cmd_cc_injector ;;
     status) cmd_status ;;
