@@ -18,7 +18,6 @@ import signal
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -228,12 +227,20 @@ def main() -> int:
     ffmpeg = shutil.which("ffmpeg") or os.environ.get("NEXBREAK_FFMPEG", "ffmpeg")
     threading.Thread(target=cue_listener, args=(args.cue_sock,), daemon=True).start()
 
-    tmp = tempfile.mkdtemp(prefix="nexbreak-cc-")
+    # ProtectSystem=strict blocks /tmp — use RuntimeDirectory (/run/nexbreak).
+    run_dir = os.environ.get("NEXBREAK_RUN_DIR", "/run/nexbreak")
+    tmp = os.path.join(run_dir, f"cc-inject-{os.getpid()}")
+    os.makedirs(tmp, mode=0o770, exist_ok=True)
     raw_v = os.path.join(tmp, "raw.h264")
     inj_v = os.path.join(tmp, "inj.h264")
     raw_a = os.path.join(tmp, "raw.aac")
     for p in (raw_v, inj_v, raw_a):
-        os.mkfifo(p)
+        if os.path.exists(p):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        os.mkfifo(p, 0o660)
 
     enc = subprocess.Popen(
         [
