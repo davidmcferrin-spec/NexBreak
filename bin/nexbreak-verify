@@ -94,7 +94,7 @@ def _start_scte_watch(
     *,
     processing: Optional[dict[str, Any]],
     tap: dict[str, Any],
-    auto_inject_sec: float = 12.0,
+    auto_inject_sec: float = 0.0,
 ) -> dict[str, Any]:
     eid = int(egress["id"])
     stop_watch_pid(eid)
@@ -328,13 +328,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not tap.get("ok"):
                     self._send(400, {"ok": False, "error": tap.get("error") or "tap failed"})
                     return
-                auto_sec = 12.0
+                # Test cues are OPT-IN: they inject real SCTE-35 into the
+                # program feed, which downstream receivers act on. Default 0.
+                auto_sec = 0.0
                 if isinstance(_body, dict) and _body.get("auto_inject_sec") is not None:
                     try:
                         auto_sec = float(_body["auto_inject_sec"])
                     except (TypeError, ValueError):
-                        auto_sec = 12.0
-                # Listen owns continuous verify: watch + periodic test injects until Stop.
+                        auto_sec = 0.0
+                # Listen owns continuous verify: watch (+ optional test cues) until Stop.
                 result = _start_scte_watch(
                     eg,
                     processing=proc,

@@ -56,6 +56,23 @@ _stop = False
 RECENT_MAX = 80
 SCTE_MARKER = "##scte##"
 
+# Verify test cues use event ids in this range (see _auto_inject_loop) so
+# they can be labeled in the UI and never confused with operator Rolls.
+TEST_CUE_EVENT_MIN = 0x50000000
+TEST_CUE_EVENT_MAX = 0x5FFFFFFF
+
+# Splice commands are deliberately sent multiple times (proc x3, test cues x2)
+# — identical copies within this window collapse into one entry with a
+# repeat counter instead of flooding the Received table.
+REPEAT_WINDOW_S = 30.0
+
+
+def is_test_cue(event_id: Any) -> bool:
+    try:
+        return TEST_CUE_EVENT_MIN <= int(event_id) <= TEST_CUE_EVENT_MAX
+    except (TypeError, ValueError):
+        return False
+
 
 def _handle(signum, _frame):
     global _stop
@@ -424,7 +441,7 @@ def main() -> int:
         "--auto-inject-sec",
         type=float,
         default=0.0,
-        help="Seconds between verify test splices (0=off). Default off; Listen enables ~12s.",
+        help="Seconds between verify test cues (0=off). Off unless the Verify UI opts in (~12s).",
     )
     parser.add_argument(
         "--auto-inject-first-delay-sec",
@@ -524,6 +541,45 @@ def main() -> int:
                 )
             return
 
+        # Same command sent multiple times on purpose → collapse copies.
+        with lock:
+            prev = recent[0] if recent else None
+            is_repeat = (
+                prev is not None
+                and parsed.get("event_id") is not None
+                and prev.get("event_id") == parsed.get("event_id")
+                and prev.get("splice_type") == stype
+                and (now - float(prev.get("last_ts") or prev.get("ts") or 0))
+                <= REPEAT_WINDOW_S
+            )
+            if is_repeat:
+                prev["repeats"] = int(prev.get("repeats") or 1) + 1
+                prev["last_ts"] = now
+                repeats = prev["repeats"]
+        if is_repeat:
+            # First copy may beat its audit row into the DB — upgrade on repeat.
+            if conn is not None and prev is not None and not prev.get("verified"):
+                try:
+                    if correlate_audit(
+                        conn,
+                        processing_channel_id=args.processing_channel_id or None,
+                        event_id=parsed.get("event_id"),
+                        window_s=window_s,
+                    ):
+                        with lock:
+                            prev["verified"] = True
+                except Exception:  # noqa: BLE001
+                    pass
+            bump_state(last_scte_at=now, locked=True, error=None)
+            log.info(
+                "SCTE repeat copy egress=%s event_id=%s type=%s x%s",
+                eid,
+                parsed.get("event_id"),
+                stype,
+                repeats,
+            )
+            return
+
         verified = False
         if conn is not None:
             try:
@@ -546,11 +602,14 @@ def main() -> int:
 
         entry = {
             "ts": now,
+            "last_ts": now,
+            "repeats": 1,
             "event_id": parsed.get("event_id"),
             "splice_type": parsed.get("splice_type"),
             "out_of_network": parsed.get("out_of_network"),
             "cancel": parsed.get("cancel"),
             "verified": verified,
+            "test_cue": is_test_cue(parsed.get("event_id")),
             "raw_snip": parsed.get("raw_snip"),
         }
         with lock:
@@ -566,11 +625,12 @@ def main() -> int:
             scte_insert_count=insert_n,
         )
         log.info(
-            "SCTE seen egress=%s event_id=%s type=%s verified=%s",
+            "SCTE seen egress=%s event_id=%s type=%s verified=%s%s",
             eid,
             parsed.get("event_id"),
             parsed.get("splice_type"),
             verified,
+            " (test cue)" if entry["test_cue"] else "",
         )
 
     def read_tsp_stderr(stream) -> None:

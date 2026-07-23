@@ -199,6 +199,15 @@ Done:
  the same UDP socket (first byte 0xFC). `scte35_command_payload()` routes
  hex/bin/xml; proc counts spliceinject command errors as `rejected` in the
  splice-monitor state and the Verify panel shows the last reject line.
+- Verify test cues (2026-07-23): Listen no longer auto-fires splices by
+ default — test cues are OPT-IN (UI checkbox → `auto_inject_sec: 12`,
+ server default 0) because they are real SCTE-35 markers downstream
+ receivers act on. Test cues use event ids 0x50000000–0x5FFFFFFF and are
+ badged "test" in Sent/Received; duplicate copies of the same command
+ (proc sends x3, test cues x2 — intentional, idempotent) collapse into one
+ Received row with a ×N repeat counter (30s window, scte-watch). There is
+ no command queue anywhere in the splice path: spliceinject injects
+ immediates on arrival, UDP does not backlog.
 - `web/` UI: Dashboard, Roll (with live preview + CC overlay + policy cycle), Preview,
   Channels (processing + egress editors; Copy URL for SRT listener / HLS M3U8), Router, Captions, Verify, Services
   (systemd/journal via allowlisted sudo wrappers — no controller), Metrics (host

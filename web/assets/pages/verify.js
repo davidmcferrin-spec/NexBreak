@@ -42,6 +42,12 @@
     return String(v);
   }
 
+  // Verify test cues use event ids 0x50000000–0x5FFFFFFF (scte-watch).
+  function isTestCue(eventId) {
+    var n = Number(eventId);
+    return Number.isFinite(n) && n >= 0x50000000 && n <= 0x5fffffff;
+  }
+
   function bindFocusRows(root) {
     if (!root) return;
     root.querySelectorAll("tr[data-event-id]").forEach(function (tr) {
@@ -141,17 +147,17 @@
     } else if (listening || live.listening) {
       if (live.scte_null_count) {
         bits.push(
-          '<span class="muted">SCTE PID alive (splice_null keepalive) — waiting for splice_insert from Roll/auto-inject</span>'
+          '<span class="muted">SCTE PID alive (splice_null keepalive) — waiting for splice_insert (Roll or test cue)</span>'
         );
       } else {
         bits.push(
-          '<span class="muted">Listening — auto-injects running; rows appear when TID 0xFC splice_insert is seen</span>'
+          '<span class="muted">Listening — rows appear when TID 0xFC splice_insert is seen</span>'
         );
       }
     }
     if (live.last_auto_inject_at) {
       bits.push(
-        '<span class="badge dim">auto ' +
+        '<span class="badge dim">test cue ' +
           api.esc(String(live.last_auto_inject_type || "inject")) +
           " " +
           api.esc(ageLabel(live.last_auto_inject_at)) +
@@ -161,7 +167,7 @@
       );
     } else if ((listening || live.listening) && live.auto_inject_sec) {
       bits.push(
-        '<span class="badge dim">auto-inject every ' +
+        '<span class="badge dim">test cues every ' +
           api.esc(String(live.auto_inject_sec)) +
           "s</span>"
       );
@@ -249,6 +255,9 @@
             var eventId = eidMatch ? eidMatch[1] : "";
             var matched = eventId && matchedIds[eventId];
             var rowClass = matched ? " verify-matched" : "";
+            var testCue =
+              String(e.detail || "").indexOf("verify auto-inject") >= 0 ||
+              isTestCue(eventId);
             return (
               '<tr class="' +
               rowClass.trim() +
@@ -260,6 +269,7 @@
               api.esc(eventId || "—") +
               "</td><td>" +
               api.esc(e.splice_type || "—") +
+              (testCue ? ' <span class="badge dim">test</span>' : "") +
               "</td><td>" +
               (e.result === "success"
                 ? '<span class="badge ok">ok</span>'
@@ -338,17 +348,23 @@
                   : "—";
             var matched = (eid && matchedIds[eid]) || !!e.verified;
             var rowClass = matched ? " verify-matched" : "";
+            var testCue = e.test_cue != null ? !!e.test_cue : isTestCue(eid);
+            var repeats = Number(e.repeats || 1);
             return (
               '<tr class="' +
               rowClass.trim() +
               '"' +
               (eid ? ' data-event-id="' + api.esc(eid) + '"' : "") +
               "><td>" +
-              api.esc(ageLabel(e.ts)) +
+              api.esc(ageLabel(e.last_ts || e.ts)) +
               "</td><td>" +
               api.esc(eid || "—") +
+              (repeats > 1
+                ? ' <span class="muted">×' + api.esc(String(repeats)) + "</span>"
+                : "") +
               "</td><td>" +
               api.esc(String(e.splice_type || "—")) +
+              (testCue ? ' <span class="badge dim">test</span>' : "") +
               "</td><td>" +
               api.esc(oon) +
               "</td><td>" +
@@ -512,6 +528,8 @@
     document.getElementById("btn-listen").disabled = listening;
     document.getElementById("btn-stop").disabled = !listening;
     sel().disabled = listening;
+    var autoBox = document.getElementById("verify-autoinject");
+    if (autoBox) autoBox.disabled = listening;
     if (!listening) missCount = 0;
   }
 
@@ -641,8 +659,10 @@
     var btn = document.getElementById("btn-listen");
     btn.disabled = true;
     btn.textContent = "Starting…";
+    var autoBox = document.getElementById("verify-autoinject");
+    var autoSec = autoBox && autoBox.checked ? 12 : 0;
     var r = await api.post("/v1/verify/" + selectedId + "/listen", {
-      auto_inject_sec: 12,
+      auto_inject_sec: autoSec,
     });
     btn.textContent = "Listen";
     if (!r.ok || !r.data || !r.data.ok) {
@@ -657,9 +677,9 @@
     missCount = 0;
     setListeningUi(true);
     api.toast(
-      "Listening until Stop — auto-inject every " +
-        (r.data.auto_inject_sec != null ? r.data.auto_inject_sec : 12) +
-        "s",
+      r.data.auto_inject_sec
+        ? "Listening until Stop — test cues every " + r.data.auto_inject_sec + "s"
+        : "Listening until Stop — passive (no test cues)",
       "success"
     );
     if (r.data.tap) {
