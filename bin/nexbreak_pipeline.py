@@ -5,7 +5,8 @@ Pipeline builders for nexbreak-proc / nexbreak-egress.
 ffmpeg remux/transcode → tsp (PMT + spliceinject) → UDP local feed
 egress: UDP local feed → SRT via tsp (packet-faithful; preserves SCTE-35)
   or ffmpeg libsrt when NEXBREAK_EGRESS_ENGINE=ffmpeg (may drop 0x86 PIDs).
-HLS deferred.
+HLS origin_pull: UDP local feed → ffmpeg HLS (mpegts segments) under
+  /var/lib/nexbreak/hls/<service_name>/, served by Apache at /hls/.
 
 Loopback feeds are rewritten to multicast (239.255.98.1 by default) so
 multiple local readers each get a full packet copy.
@@ -18,6 +19,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -396,6 +398,95 @@ def build_srt_output_url(channel: dict[str, Any]) -> str:
     return f"srt://{host}:{int(port)}?mode=caller&{common}&{idle}"
 
 
+def hls_data_root() -> Path:
+    """Durable HLS publish root (Apache Alias /hls/ → here)."""
+    return Path(os.environ.get("NEXBREAK_DATA") or "/var/lib/nexbreak") / "hls"
+
+
+def hls_safe_service_name(service_name: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(service_name or "").strip())
+    if not safe or safe in (".", ".."):
+        raise ValueError("invalid egress service_name for HLS path")
+    return safe
+
+
+def hls_channel_dir(service_name: str) -> Path:
+    return hls_data_root() / hls_safe_service_name(service_name)
+
+
+def prepare_hls_publish_dir(service_name: str) -> Path:
+    """
+    Ensure /var/lib/nexbreak/hls/<service_name>/ exists and clear stale segments.
+    Returns the directory path (playlist will be index.m3u8 inside).
+    """
+    d = hls_channel_dir(service_name)
+    d.mkdir(parents=True, mode=0o755, exist_ok=True)
+    try:
+        d.chmod(0o755)
+    except OSError:
+        pass
+    for pattern in ("*.ts", "*.m4s", "*.m3u8", "*.tmp"):
+        for stale in d.glob(pattern):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+    return d
+
+
+def ffmpeg_hls_egress_argv(
+    *,
+    ffmpeg: str,
+    feed_host: str,
+    feed_port: int,
+    egress: dict[str, Any],
+    publish_dir: Optional[Path] = None,
+) -> list[str]:
+    """
+    Pull local MPEG-TS UDP feed and write HLS (mpegts segments, copy).
+
+    origin_pull only. SCTE-35 private PIDs are more likely to survive in
+    mpegts segments than fMP4; still not as faithful as tsp→SRT.
+    """
+    if egress.get("output_type") != "hls":
+        raise ValueError("ffmpeg_hls_egress_argv requires output_type=hls")
+    mode = (egress.get("hls_mode") or "origin_pull").lower()
+    if mode != "origin_pull":
+        raise ValueError(f"hls_mode={mode} not supported by origin packager (use origin_pull)")
+
+    svc = egress.get("service_name")
+    if not svc:
+        raise ValueError("service_name required for HLS origin_pull")
+    out_dir = Path(publish_dir) if publish_dir else prepare_hls_publish_dir(str(svc))
+    playlist = out_dir / "index.m3u8"
+    segment = out_dir / "seg_%05d.ts"
+
+    hls_time = int(os.environ.get("NEXBREAK_HLS_TIME", "2"))
+    hls_list = int(os.environ.get("NEXBREAK_HLS_LIST_SIZE", "10"))
+    src = udp_mpegts_input_url(feed_host, feed_port, fifo_size=2000000)
+
+    return [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel", "warning",
+        "-nostdin",
+        "-fflags", "+genpts+discardcorrupt",
+        "-analyzeduration", "2000000",
+        "-probesize", "2000000",
+        "-f", "mpegts",
+        "-i", src,
+        "-map", "0",
+        "-c", "copy",
+        "-f", "hls",
+        "-hls_time", str(max(1, hls_time)),
+        "-hls_list_size", str(max(3, hls_list)),
+        "-hls_flags", "delete_segments+append_list+independent_segments",
+        "-hls_segment_type", "mpegts",
+        "-hls_segment_filename", str(segment),
+        str(playlist),
+    ]
+
+
 def ffmpeg_egress_argv(
     *,
     ffmpeg: str,
@@ -404,14 +495,23 @@ def ffmpeg_egress_argv(
     egress: dict[str, Any],
 ) -> list[str]:
     """
-    Pull local MPEG-TS UDP feed and push SRT (copy). HLS deferred.
+    Pull local MPEG-TS UDP feed and push SRT (copy).
 
     Prefer tsp_egress_argv for production: ffmpeg demux/remux often drops
     SCTE-35 (stream_type 0x86) private data PIDs even with -map 0 -c copy.
     Kept for NEXBREAK_EGRESS_ENGINE=ffmpeg fallback / dry-run comparison.
+
+    For HLS use ffmpeg_hls_egress_argv (always ffmpeg; tsp cannot package HLS).
     """
+    if egress["output_type"] == "hls":
+        return ffmpeg_hls_egress_argv(
+            ffmpeg=ffmpeg,
+            feed_host=feed_host,
+            feed_port=feed_port,
+            egress=egress,
+        )
     if egress["output_type"] != "srt":
-        raise ValueError(f"egress output_type={egress['output_type']} not implemented yet (v1 = srt)")
+        raise ValueError(f"egress output_type={egress['output_type']} not supported")
 
     src = udp_mpegts_input_url(feed_host, feed_port, fifo_size=2000000)
     dst = build_srt_output_url(egress)
@@ -447,10 +547,12 @@ def tsp_egress_argv(
 
     Listener uses --multiple so sequential clients can reconnect without
     restarting tsp; caller/rendezvous exit when the peer drops (egress
-    service restarts them).
+    service restarts them). HLS is ffmpeg-only.
     """
     if egress["output_type"] != "srt":
-        raise ValueError(f"egress output_type={egress['output_type']} not implemented yet (v1 = srt)")
+        raise ValueError(
+            f"tsp egress only supports SRT (got output_type={egress['output_type']})"
+        )
 
     mode = (egress.get("srt_mode") or "listener").lower()
     latency_ms = int(os.environ.get("NEXBREAK_SRT_LATENCY_MS", "800"))

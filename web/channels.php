@@ -146,17 +146,6 @@ require __DIR__ . '/include/header.php';
     <label class="egr-srt egr-srt-remote">Remote host <input id="e-srt_remote_host" placeholder="10.0.0.50"></label>
     <label class="egr-srt egr-srt-remote">Remote port <input type="number" id="e-srt_remote_port" min="1" max="65535"></label>
     <label class="egr-srt egr-srt-listen">Listen port <input type="number" id="e-srt_listen_port" min="1" max="65535"></label>
-    <div class="egr-srt egr-srt-listen egr-listen-url" style="grid-column:1/-1">
-      <label for="e-listen-url">Client URL (VLC / CDN)</label>
-      <div class="bar" style="margin-top:4px">
-        <input id="e-listen-url" readonly style="flex:1;min-width:12rem" spellcheck="false">
-        <button type="button" id="btn-egr-copy-url">Copy</button>
-      </div>
-      <p class="muted" style="margin:6px 0 0;font-size:12px">
-        Players connect as SRT callers to this listener. Hostname comes from your browser address bar
-        (use the appliance LAN name/IP in the URL bar for a pasteable remote link).
-      </p>
-    </div>
     <label class="egr-hls">HLS mode
       <select id="e-hls_mode">
         <option value="origin_pull">Origin pull (we host)</option>
@@ -164,12 +153,21 @@ require __DIR__ . '/include/header.php';
       </select>
     </label>
     <label class="egr-hls egr-hls-push">Push URL <input id="e-hls_push_url" placeholder="https://cdn.example/ingest/…"></label>
+    <div class="egr-client-url" id="egr-client-url" style="grid-column:1/-1" hidden>
+      <label for="e-client-url">Client URL (VLC / CDN)</label>
+      <div class="bar" style="margin-top:4px">
+        <input id="e-client-url" readonly style="flex:1;min-width:12rem" spellcheck="false">
+        <button type="button" id="btn-egr-copy-url">Copy</button>
+      </div>
+      <p class="muted" id="e-client-url-hint" style="margin:6px 0 0;font-size:12px"></p>
+    </div>
     <div class="bitrate-readout" id="e-bitrate-box">
       <div class="muted" style="font-size:0.85rem;margin-bottom:4px">Bitrate (from routed input)</div>
       <div>Sensed input: <strong id="e-bitrate-sensed">—</strong> kbps</div>
       <div>Output target: <strong id="e-bitrate-out">—</strong> kbps <span class="muted">(+10 for captions)</span></div>
     </div>
     <input type="hidden" id="e-bitrate" value="">
+    <input type="hidden" id="e-service_name" value="">
     <label>Enabled
       <select id="e-enabled">
         <option value="1">Yes</option>
@@ -178,7 +176,8 @@ require __DIR__ . '/include/header.php';
     </label>
   </form>
   <p class="warn-banner" id="egr-hls-warn" hidden style="margin-top:10px">
-    HLS egress is in the schema but not implemented in <code>nexbreak-egress</code> yet (v1 = SRT only).
+    HLS <strong>push_put</strong> is not implemented yet. Use <strong>origin_pull</strong> to host an M3U8 on this appliance
+    (<code>/hls/&lt;svc&gt;/index.m3u8</code>), or switch back to SRT.
   </p>
   <p class="warn-banner" style="margin-top:10px">
     After saving, restart <code>nexbreak-egress@N</code> (Services page) for transport changes to take effect.

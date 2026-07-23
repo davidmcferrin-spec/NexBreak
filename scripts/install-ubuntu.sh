@@ -165,12 +165,14 @@ cmd_deps() {
 
 cmd_install() {
   id -u nexbreak &>/dev/null || useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin nexbreak
-  mkdir -p "$PREFIX" "$DATA" "$LOG" "$DATA/scte" /run/nexbreak
+  mkdir -p "$PREFIX" "$DATA" "$LOG" "$DATA/scte" "$DATA/hls" /run/nexbreak
   rsync -a --delete \
     --exclude '.git' --exclude 'data/*.sqlite' --exclude '__pycache__' \
     "$ROOT"/ "$PREFIX"/
   chown -R nexbreak:nexbreak "$DATA" "$LOG" /run/nexbreak
+  chmod 2755 "$DATA/hls" || chmod 0755 "$DATA/hls" || true
   # www-data needs to reach the controller HTTP port only (loopback)
+  # and read HLS origin files (group nexbreak).
   usermod -aG nexbreak www-data || true
   chmod 0755 "$PREFIX"/bin/nexbreak-*
   # Substitute PREFIX/DATA into unit files (templates ship with /opt and /var/lib defaults)
@@ -184,8 +186,11 @@ cmd_install() {
   install -m 644 "$PREFIX"/config/mediamtx.yml /etc/nexbreak/mediamtx.yml
   if [[ -f "$PREFIX"/config/apache-nexbreak.conf ]]; then
     install -m 644 "$PREFIX"/config/apache-nexbreak.conf /etc/apache2/sites-available/nexbreak.conf
-    # Rewrite DocumentRoot to PREFIX/web
-    sed -i "s|/opt/nexbreak|$PREFIX|g" /etc/apache2/sites-available/nexbreak.conf
+    # Rewrite DocumentRoot + HLS Alias to PREFIX / DATA
+    sed -i \
+      -e "s|/opt/nexbreak|$PREFIX|g" \
+      -e "s|/var/lib/nexbreak|$DATA|g" \
+      /etc/apache2/sites-available/nexbreak.conf
     a2ensite nexbreak || true
   fi
   # Services page: allowlisted sudo wrappers for www-data (NexVUE pattern)

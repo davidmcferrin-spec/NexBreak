@@ -149,7 +149,7 @@ Apache site: `config/apache-nexbreak.conf` (installed as `nexbreak.conf`).
 Open `http://<host>/` for the UI.
 
 **Channels** edits processing inputs and egress outputs (SRT caller/listener/
-rendezvous, HLS modes — HLS not wired in the egress binary yet). Transport
+rendezvous, HLS origin_pull — Apache serves `/hls/<svc>/index.m3u8`). Transport
 changes need a unit restart.
 
 **Services** / **Metrics** mirror NexVUE ops: `install` drops allowlisted

@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-nexbreak-egress — local feed → SRT (v1) / HLS (later).
+nexbreak-egress — local feed → SRT / HLS origin_pull.
 
 Reads the MPEG-TS UDP feed currently assigned by routing_assignments
-(processing local_feed_host:port) and pushes SRT.
+(processing local_feed_host:port) and delivers:
 
-Default engine is TSDuck (`tsp -I ip … -O srt`) so SCTE-35 PIDs survive
-packet-faithfully. Set NEXBREAK_EGRESS_ENGINE=ffmpeg to use the legacy
-ffmpeg remux (known to drop stream_type 0x86 private data).
+- SRT: default engine TSDuck (`tsp -I ip … -O srt`) so SCTE-35 PIDs survive
+  packet-faithfully. Set NEXBREAK_EGRESS_ENGINE=ffmpeg for libsrt remux.
+- HLS origin_pull: always ffmpeg → /var/lib/nexbreak/hls/<service_name>/index.m3u8
+  (Apache Alias /hls/). push_put is not implemented — idles instead of crash-looping.
 
-Self-healing: the push process is restarted on exit. SRT listener mode uses
-tsp --multiple (or ffmpeg peeridletimeout) so a dropped client can reconnect.
+Self-healing: the push/packager process is restarted on exit. SRT listener mode
+uses tsp --multiple (or ffmpeg peeridletimeout) so a dropped client can reconnect.
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ from nexbreak_db import audit, connect, get_egress_by_service, row_to_dict  # no
 from nexbreak_pipeline import (  # noqa: E402
     egress_engine,
     ffmpeg_egress_argv,
+    ffmpeg_hls_egress_argv,
+    prepare_hls_publish_dir,
     require_bins,
     resolve_local_feed_host,
     tsp_egress_argv,
@@ -112,7 +115,7 @@ def _stderr_watch(proc: Popen, stream) -> None:
                 continue
             low = line.lower()
             if any(m in low for m in _FATAL_MARKERS):
-                log.warning("SRT fault — recycling: %s", line[:200])
+                log.warning("egress fault — recycling: %s", line[:200])
                 _kill_requested = True
                 try:
                     proc.terminate()
@@ -146,7 +149,33 @@ def _spawn(argv: list[str]) -> Popen:
     return proc
 
 
+def _idle_until_stop(reason: str) -> int:
+    """Stay up without restarting — avoids systemd Restart=always crash loops."""
+    log.error("%s — idling until stop/config change", reason)
+    while not _stop:
+        time.sleep(5.0)
+    return 0
+
+
 def _build_argv(feed_host: str, feed_port: int, channel: dict[str, Any]) -> tuple[str, list[str]]:
+    out_type = (channel.get("output_type") or "srt").lower()
+    if out_type == "hls":
+        mode = (channel.get("hls_mode") or "origin_pull").lower()
+        if mode == "push_put":
+            raise ValueError("hls push_put not implemented yet")
+        if mode != "origin_pull":
+            raise ValueError(f"unsupported hls_mode={mode}")
+        bins = require_bins("ffmpeg")
+        publish_dir = prepare_hls_publish_dir(str(channel["service_name"]))
+        argv = ffmpeg_hls_egress_argv(
+            ffmpeg=bins["ffmpeg"],
+            feed_host=feed_host,
+            feed_port=feed_port,
+            egress=channel,
+            publish_dir=publish_dir,
+        )
+        return "ffmpeg", argv
+
     engine = egress_engine()
     if engine == "ffmpeg":
         bins = require_bins("ffmpeg")
@@ -194,6 +223,24 @@ def main() -> int:
             log.warning("egress %s disabled — exiting", channel["name"])
             return 0
 
+        out_type = (channel.get("output_type") or "srt").lower()
+        hls_mode = (channel.get("hls_mode") or "origin_pull").lower()
+        if out_type == "hls" and hls_mode == "push_put":
+            try:
+                audit(
+                    conn,
+                    event_type="service_start",
+                    egress_channel_id=channel["id"],
+                    result="failure",
+                    detail="hls push_put not implemented — idle",
+                )
+            except Exception:
+                pass
+            if args.once or args.dry_run:
+                print("IDLE hls push_put not implemented")
+                return 0
+            return _idle_until_stop("hls push_put not implemented")
+
         source = _routed_source(conn, channel["id"])
         if source is None:
             log.error(
@@ -205,36 +252,63 @@ def main() -> int:
         feed_host = source["local_feed_host"] or "127.0.0.1"
         feed_port = int(source["local_feed_port"])
         feed_dest = resolve_local_feed_host(feed_host)
+        mode_note = (
+            f"hls_mode={hls_mode}"
+            if out_type == "hls"
+            else f"srt_mode={channel.get('srt_mode')}"
+        )
         log.info(
-            "plan: %s type=%s ← %s (%s:%s → %s:%s) srt_mode=%s engine=%s",
+            "plan: %s type=%s ← %s (%s:%s → %s:%s) %s",
             channel["name"],
-            channel["output_type"],
+            out_type,
             source["name"],
             feed_host,
             feed_port,
             feed_dest,
             feed_port,
-            channel.get("srt_mode"),
-            egress_engine(),
+            mode_note,
         )
 
         try:
             engine, argv = _build_argv(feed_host, feed_port, channel)
         except Exception as exc:  # noqa: BLE001
-            log.error("egress config error: %s", exc)
-            return 1
+            # Unimplemented / bad config: idle instead of exit-1 crash loop.
+            msg = str(exc)
+            log.error("egress config error: %s", msg)
+            if args.once or args.dry_run:
+                return 1
+            try:
+                audit(
+                    conn,
+                    event_type="service_crash",
+                    egress_channel_id=channel["id"],
+                    result="failure",
+                    detail=f"egress config error: {msg}",
+                )
+            except Exception:
+                pass
+            return _idle_until_stop(f"egress config error: {msg}")
 
         if args.once or args.dry_run:
             print(engine.upper(), " ".join(argv))
             return 0
 
         log.info("%s: %s", engine, " ".join(argv))
-        if engine == "ffmpeg" and "peeridletimeout=" not in " ".join(argv):
+        if (
+            out_type == "srt"
+            and engine == "ffmpeg"
+            and "peeridletimeout=" not in " ".join(argv)
+        ):
             log.error(
                 "BUG: SRT URL missing peeridletimeout — wrong nexbreak_pipeline deployed?"
             )
         _proc = _spawn(argv)
 
+        dest_detail = (
+            f"hls /hls/{channel['service_name']}/index.m3u8"
+            if out_type == "hls"
+            else out_type
+        )
         audit(
             conn,
             event_type="service_start",
@@ -242,8 +316,8 @@ def main() -> int:
             processing_channel_id=source["id"],
             detail=(
                 f"nexbreak-egress@{args.service_name} up; "
-                f"udp://{feed_host}:{feed_port} → {channel['output_type']} "
-                f"via {engine} (self-heal on SRT peer drop)"
+                f"udp://{feed_host}:{feed_port} → {dest_detail} "
+                f"via {engine}"
             ),
         )
 
@@ -253,7 +327,7 @@ def main() -> int:
         while not _stop:
             if _proc is not None and _proc.poll() is not None:
                 code = _proc.returncode
-                reason = "srt-fault" if _kill_requested else f"exit-{code}"
+                reason = "fault" if _kill_requested else f"exit-{code}"
                 now = time.time()
                 if now < restart_at:
                     time.sleep(0.1)
@@ -287,6 +361,10 @@ def main() -> int:
                 _proc = None
                 try:
                     channel = get_egress_by_service(conn, args.service_name) or channel
+                    out_type = (channel.get("output_type") or "srt").lower()
+                    hls_mode = (channel.get("hls_mode") or "origin_pull").lower()
+                    if out_type == "hls" and hls_mode == "push_put":
+                        return _idle_until_stop("hls push_put not implemented")
                     source = _routed_source(conn, channel["id"])
                     if source is None:
                         raise RuntimeError(
@@ -298,9 +376,7 @@ def main() -> int:
                     feed_port = int(source["local_feed_port"])
                     engine, argv = _build_argv(feed_host, feed_port, channel)
                 except Exception as exc:  # noqa: BLE001
-                    # Match startup: config/bin errors exit so systemd Restart=
-                    # can re-read SQLite instead of hanging in this loop.
-                    log.error("egress rebuild failed: %s — exiting", exc)
+                    log.error("egress rebuild failed: %s — idling", exc)
                     try:
                         audit(
                             conn,
@@ -311,7 +387,7 @@ def main() -> int:
                         )
                     except Exception:
                         pass
-                    return 1
+                    return _idle_until_stop(f"egress rebuild failed: {exc}")
                 _proc = _spawn(argv)
                 continue
             # Healthy run — decay backoff toward fast reconnect.

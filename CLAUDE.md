@@ -169,9 +169,10 @@ Done:
   + MediaMTX RTSP preview publisher (WHEP)
   + caption policy (auto preserve / force ASR / off) with CEA-608 A/53 insert
     into the local feed when ASR is required; Vosk sidecar + cc-inject
-- `nexbreak-egress`: UDP local feed → SRT (ffmpeg)
+- `nexbreak-egress`: UDP local feed → SRT (tsp) or HLS origin_pull (ffmpeg →
+  `/var/lib/nexbreak/hls/<svc>/`, Apache `/hls/`)
 - `web/` UI: Dashboard, Roll (with live preview + CC overlay + policy cycle), Preview,
-  Channels (processing + egress editors), Router, Captions, Verify, Services
+  Channels (processing + egress editors; Copy URL for SRT listener / HLS M3U8), Router, Captions, Verify, Services
   (systemd/journal via allowlisted sudo wrappers — no controller), Metrics (host
   CPU/mem/disk/uptime/GPU + audit-derived splice/config/routing activity), Audit;
   `/api` PHP proxy to controller/verify
@@ -179,6 +180,6 @@ Done:
 Next:
 - Hardware bring-up of channel 1 against a real RTSP source
 - Optional: replace sudoers ops wrappers with Unix-socket privileged helper
-- HLS egress mode
+- HLS `push_put` remote ingest
 - TLS on MediaMTX when UI is HTTPS (same NexVUE pattern)
 - CEA-708 service layer (CC1 A/53 shipped first)

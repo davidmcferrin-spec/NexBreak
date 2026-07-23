@@ -79,17 +79,49 @@
     return "srt://" + host + ":" + p;
   }
 
-  function refreshEgrListenUrl() {
-    var input = document.getElementById("e-listen-url");
-    if (!input) return;
-    var type = document.getElementById("e-output_type").value;
-    var mode = document.getElementById("e-srt_mode").value;
-    var port = document.getElementById("e-srt_listen_port").value;
-    if (type === "srt" && mode === "listener") {
-      input.value = srtListenerUrl(port) || "";
-    } else {
-      input.value = "";
+  /** Origin-pull HLS playlist URL served by Apache Alias /hls/. */
+  function hlsOriginUrl(serviceName) {
+    var svc = String(serviceName == null ? "" : serviceName).trim();
+    if (!svc) return "";
+    return window.location.origin + "/hls/" + encodeURIComponent(svc) + "/index.m3u8";
+  }
+
+  /** Best client URL for an egress channel, or "" if none. */
+  function egressClientUrl(ch) {
+    if (!ch) return "";
+    if (ch.output_type === "hls" && (ch.hls_mode || "origin_pull") === "origin_pull") {
+      return hlsOriginUrl(ch.service_name);
     }
+    if (ch.output_type === "srt" && ch.srt_mode === "listener" && ch.srt_listen_port) {
+      return srtListenerUrl(ch.srt_listen_port);
+    }
+    return "";
+  }
+
+  function refreshEgrClientUrl() {
+    var box = document.getElementById("egr-client-url");
+    var input = document.getElementById("e-client-url");
+    var hint = document.getElementById("e-client-url-hint");
+    if (!box || !input) return;
+    var type = document.getElementById("e-output_type").value;
+    var srtMode = document.getElementById("e-srt_mode").value;
+    var hlsMode = document.getElementById("e-hls_mode").value;
+    var port = document.getElementById("e-srt_listen_port").value;
+    var svc = document.getElementById("e-service_name").value;
+    var url = "";
+    var hintText = "";
+    if (type === "srt" && srtMode === "listener") {
+      url = srtListenerUrl(port) || "";
+      hintText =
+        "Players connect as SRT callers to this listener. Hostname comes from your browser address bar.";
+    } else if (type === "hls" && hlsMode === "origin_pull") {
+      url = hlsOriginUrl(svc) || "";
+      hintText =
+        "Paste into VLC or a CDN as an HLS origin. Playlist appears after egress is running.";
+    }
+    input.value = url;
+    if (hint) hint.textContent = hintText;
+    box.hidden = !url;
   }
 
   function setBitrateReadout(prefix, ch) {
@@ -165,19 +197,14 @@
             '" data-kind="' +
             kind +
             '">Edit</button>';
-          if (
-            kind === "egr" &&
-            c.output_type === "srt" &&
-            c.srt_mode === "listener" &&
-            c.srt_listen_port
-          ) {
-            var listenUrl = srtListenerUrl(c.srt_listen_port);
-            if (listenUrl) {
+          if (kind === "egr") {
+            var clientUrl = egressClientUrl(c);
+            if (clientUrl) {
               actions +=
                 ' <button type="button" data-copy-url="' +
-                api.esc(listenUrl) +
+                api.esc(clientUrl) +
                 '" title="' +
-                api.esc(listenUrl) +
+                api.esc(clientUrl) +
                 '">Copy URL</button>';
             }
           }
@@ -341,8 +368,9 @@
     document.querySelectorAll(".egr-hls-push").forEach(function (el) {
       el.hidden = type !== "hls" || hlsMode !== "push_put";
     });
-    document.getElementById("egr-hls-warn").hidden = type !== "hls";
-    refreshEgrListenUrl();
+    document.getElementById("egr-hls-warn").hidden =
+      type !== "hls" || hlsMode !== "push_put";
+    refreshEgrClientUrl();
   }
 
   function openEgrEdit(id) {
@@ -352,6 +380,7 @@
     if (!ch) return;
     procEditor.hidden = true;
     document.getElementById("e-id").value = ch.id;
+    document.getElementById("e-service_name").value = ch.service_name || "";
     document.getElementById("e-name").value = ch.name || "";
     document.getElementById("e-output_type").value = ch.output_type || "srt";
     document.getElementById("e-srt_mode").value = ch.srt_mode || "listener";
@@ -432,9 +461,9 @@
   document.getElementById("e-output_type").addEventListener("change", syncEgrFields);
   document.getElementById("e-srt_mode").addEventListener("change", syncEgrFields);
   document.getElementById("e-hls_mode").addEventListener("change", syncEgrFields);
-  document.getElementById("e-srt_listen_port").addEventListener("input", refreshEgrListenUrl);
+  document.getElementById("e-srt_listen_port").addEventListener("input", refreshEgrClientUrl);
   document.getElementById("btn-egr-copy-url").addEventListener("click", function () {
-    var url = document.getElementById("e-listen-url").value;
+    var url = document.getElementById("e-client-url").value;
     api.copyText(url);
   });
 
