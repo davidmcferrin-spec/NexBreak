@@ -118,6 +118,13 @@
         '<span class="muted">' + api.esc(String(live.bytes_seen)) + " bytes</span>"
       );
     }
+    if (listening || live.listening) && live.scte_null_count) {
+      bits.push(
+        '<span class="badge dim">keepalive ' +
+          api.esc(String(live.scte_null_count)) +
+          "</span>"
+      );
+    }
     if (live.last_scte_at) {
       bits.push(
         "<span>Last SCTE <strong>" +
@@ -132,9 +139,15 @@
         bits.push('<span class="badge ok">return to network</span>');
       }
     } else if (listening || live.listening) {
-      bits.push(
-        '<span class="muted">Listening — auto-injects running; rows appear when TID 0xFC is seen</span>'
-      );
+      if (live.scte_null_count) {
+        bits.push(
+          '<span class="muted">SCTE PID alive (splice_null keepalive) — waiting for splice_insert from Roll/auto-inject</span>'
+        );
+      } else {
+        bits.push(
+          '<span class="muted">Listening — auto-injects running; rows appear when TID 0xFC splice_insert is seen</span>'
+        );
+      }
     }
     if (live.last_auto_inject_at) {
       bits.push(

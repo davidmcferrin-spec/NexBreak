@@ -131,6 +131,17 @@ def parse_scte_xml(xml_text: str) -> Optional[dict[str, Any]]:
         except ET.ParseError:
             return None
 
+    # Keepalive from spliceinject --min-inter-packet (not a Roll/trigger).
+    for el in root.iter():
+        if _local(el.tag).lower() in ("splice_null", "splicenull"):
+            return {
+                "event_id": None,
+                "out_of_network": None,
+                "cancel": None,
+                "splice_type": "splice_null",
+                "raw_snip": text[:240],
+            }
+
     insert = None
     for el in root.iter():
         name = _local(el.tag).lower()
@@ -491,6 +502,28 @@ def main() -> int:
             bump_state(error="SCTE XML parse failed — see scte-watch log")
             return
         now = time.time()
+        stype = str(parsed.get("splice_type") or "")
+
+        # spliceinject --min-inter-packet emits splice_null keepalives on the
+        # SCTE PID. Those prove the PID is alive but are not Roll/auto-inject
+        # triggers — recording them floods recent[] and hides real inserts.
+        if stype in ("splice_null", "splice_information"):
+            with lock:
+                null_n = int(state.get("scte_null_count") or 0) + 1
+            bump_state(
+                locked=True,
+                error=None,
+                last_scte_null_at=now,
+                scte_null_count=null_n,
+            )
+            if null_n == 1 or null_n % 50 == 0:
+                log.info(
+                    "SCTE keepalive (splice_null) egress=%s count=%s — waiting for splice_insert",
+                    eid,
+                    null_n,
+                )
+            return
+
         verified = False
         if conn is not None:
             try:
@@ -523,12 +556,14 @@ def main() -> int:
         with lock:
             recent.insert(0, entry)
             del recent[RECENT_MAX:]
+            insert_n = int(state.get("scte_insert_count") or 0) + 1
         bump_state(
             last_scte_at=now,
             last_event_id=parsed.get("event_id"),
             out_of_network=parsed.get("out_of_network"),
             locked=True,
             error=None,
+            scte_insert_count=insert_n,
         )
         log.info(
             "SCTE seen egress=%s event_id=%s type=%s verified=%s",
