@@ -181,8 +181,22 @@
     var box = sel();
     if (!r.ok || !r.data) {
       box.innerHTML = "";
+      var detail =
+        (r.data && (r.data.error || r.data.message)) ||
+        ("HTTP " + (r.status || "?"));
       document.getElementById("verify-status").innerHTML =
-        '<div class="empty">Controller unreachable</div>';
+        '<div class="empty">Verify API failed: ' +
+        api.esc(String(detail)) +
+        ". Redeploy with <code>sudo bash scripts/install-ubuntu.sh install</code> " +
+        "and <code>sudo systemctl restart nexbreak-controller</code>.</div>";
+      return;
+    }
+    if (r.data.ok === false) {
+      box.innerHTML = "";
+      document.getElementById("verify-status").innerHTML =
+        '<div class="empty">' +
+        api.esc(String(r.data.error || "Verify API error")) +
+        "</div>";
       return;
     }
     items = r.data.egresses || [];

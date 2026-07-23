@@ -15,6 +15,8 @@ Group=nexbreak
 RuntimeDirectory=nexbreak
 RuntimeDirectoryMode=0770
 Environment=NEXBREAK_RUN_DIR=/run/nexbreak
+# ASR captions: inject CEA-608 A/53 SEI into H.264 (set NEXBREAK_CC_INJECT_SIMPLE=1 to disable)
+Environment=NEXBREAK_CC_INJECT_SEI=1
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

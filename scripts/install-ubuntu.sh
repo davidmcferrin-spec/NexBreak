@@ -240,6 +240,7 @@ cmd_vosk() {
 # Managed by scripts/install-ubuntu.sh vosk — do not hand-edit; re-run vosk to refresh.
 [Service]
 Environment=NEXBREAK_VOSK_MODEL=${model_path}
+Environment=NEXBREAK_CC_INJECT_SEI=1
 EOF
   chmod 644 "$drop_in"
   systemctl daemon-reload

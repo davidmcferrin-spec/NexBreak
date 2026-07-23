@@ -455,9 +455,15 @@ def main() -> int:
     ffmpeg = shutil.which("ffmpeg") or os.environ.get("NEXBREAK_FFMPEG", "ffmpeg")
     threading.Thread(target=cue_listener, args=(args.cue_sock,), daemon=True).start()
 
-    # Default to simple remux — dual-output pipe SEI is opt-in (NEXBREAK_CC_INJECT_SEI=1).
-    want_sei = os.environ.get("NEXBREAK_CC_INJECT_SEI", "").lower() in ("1", "true", "yes")
-    if args.simple or not want_sei:
+    # Default: inject A/53 SEI so ASR text reaches the program/SRT feed.
+    # Opt out with NEXBREAK_CC_INJECT_SIMPLE=1 or --simple (remux only, no captions).
+    force_simple = args.simple or (
+        os.environ.get("NEXBREAK_CC_INJECT_SIMPLE", "").lower() in ("1", "true", "yes")
+    )
+    # Legacy opt-in still honored; default is SEI on unless SIMPLE is set.
+    sei_env = (os.environ.get("NEXBREAK_CC_INJECT_SEI") or "1").strip().lower()
+    want_sei = sei_env not in ("0", "false", "no", "off")
+    if force_simple or not want_sei:
         return run_simple(ffmpeg, args.bitrate)
 
     try:
