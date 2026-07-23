@@ -282,12 +282,36 @@ def main() -> int:
                 backoff = min(15.0, max(0.5, backoff * 1.4))
                 if _stop:
                     break
+                # Drop the dead handle before rebuild — otherwise a failed
+                # _build_argv would leave poll()!=None and spin forever.
+                _proc = None
                 try:
+                    channel = get_egress_by_service(conn, args.service_name) or channel
+                    source = _routed_source(conn, channel["id"])
+                    if source is None:
+                        raise RuntimeError(
+                            f"egress {channel['name']} has no routing assignment"
+                        )
+                    if not channel.get("enabled"):
+                        raise RuntimeError(f"egress {channel['name']} disabled")
+                    feed_host = source["local_feed_host"] or "127.0.0.1"
+                    feed_port = int(source["local_feed_port"])
                     engine, argv = _build_argv(feed_host, feed_port, channel)
                 except Exception as exc:  # noqa: BLE001
-                    log.error("egress rebuild failed: %s", exc)
-                    time.sleep(2.0)
-                    continue
+                    # Match startup: config/bin errors exit so systemd Restart=
+                    # can re-read SQLite instead of hanging in this loop.
+                    log.error("egress rebuild failed: %s — exiting", exc)
+                    try:
+                        audit(
+                            conn,
+                            event_type="service_crash",
+                            egress_channel_id=channel["id"],
+                            result="failure",
+                            detail=f"egress rebuild failed: {exc}",
+                        )
+                    except Exception:
+                        pass
+                    return 1
                 _proc = _spawn(argv)
                 continue
             # Healthy run — decay backoff toward fast reconnect.
