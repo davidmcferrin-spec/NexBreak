@@ -44,7 +44,13 @@ CREATE TABLE processing_channels (
     splice_udp_port         INTEGER,
 
     -- Captioning
-    captioning_enabled      BOOLEAN NOT NULL DEFAULT 0,
+    -- off = no ASR (source CC still preserved on remux);
+    -- auto = preserve source CC if present, else ASR insert;
+    -- force_asr = always ASR insert (H.264+A53; replaces source CC)
+    caption_policy          TEXT NOT NULL DEFAULT 'auto'
+                            CHECK (caption_policy IN ('off','auto','force_asr')),
+    -- Derived / back-compat: 0 iff policy=off; else 1 (ASR may run)
+    captioning_enabled      BOOLEAN NOT NULL DEFAULT 1,
 
     -- WebRTC preview (MediaMTX path name, e.g. nb1). NULL = 'nb' || service_name
     preview_enabled         BOOLEAN NOT NULL DEFAULT 1,

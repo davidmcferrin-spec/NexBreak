@@ -45,13 +45,20 @@ def send_splice(
     return proc_request(sock_path, body, timeout=timeout)
 
 
-def send_caption_set(sock_path: str, *, enabled: bool, timeout: float = 15.0) -> dict[str, Any]:
-    """Hot-enable or bypass captions / unload Vosk on a running proc."""
-    return proc_request(
-        sock_path,
-        {"cmd": "caption_set", "enabled": bool(enabled)},
-        timeout=timeout,
-    )
+def send_caption_set(
+    sock_path: str,
+    *,
+    enabled: Optional[bool] = None,
+    policy: Optional[str] = None,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    """Hot-set caption policy / enable on a running proc (may restart pipeline)."""
+    body: dict[str, Any] = {"cmd": "caption_set"}
+    if policy is not None:
+        body["policy"] = policy
+    if enabled is not None:
+        body["enabled"] = bool(enabled)
+    return proc_request(sock_path, body, timeout=timeout)
 
 
 def send_caption_status(sock_path: str, timeout: float = 5.0) -> dict[str, Any]:

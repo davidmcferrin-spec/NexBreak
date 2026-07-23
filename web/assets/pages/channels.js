@@ -107,8 +107,12 @@
           }
           var extras = "";
           if (kind === "proc") {
-            if (Number(c.captioning_enabled)) {
-              extras += ' <span class="badge dim" title="Captioning enabled">CC</span>';
+            var pol = c.caption_policy || (Number(c.captioning_enabled) ? "auto" : "off");
+            if (pol !== "off") {
+              extras +=
+                ' <span class="badge dim" title="Caption policy">' +
+                api.esc(pol) +
+                "</span>";
             }
             if (c.preview_enabled == null || Number(c.preview_enabled)) {
               extras += ' <span class="badge dim" title="Preview enabled">PV</span>';
@@ -240,7 +244,8 @@
     document.getElementById("p-preview_enabled").value = String(
       ch.preview_enabled == null ? 1 : Number(ch.preview_enabled)
     );
-    document.getElementById("p-captioning").value = String(Number(ch.captioning_enabled) || 0);
+    document.getElementById("p-caption-policy").value =
+      ch.caption_policy || (Number(ch.captioning_enabled) ? "auto" : "off");
     document.getElementById("p-enabled").value = String(Number(ch.enabled) || 0);
     syncProcFields();
     procEditor.hidden = false;
@@ -391,7 +396,7 @@
       target_bitrate_kbps: Number(document.getElementById("p-bitrate").value) || null,
       preview_path: document.getElementById("p-preview_path").value || null,
       preview_enabled: Number(document.getElementById("p-preview_enabled").value),
-      captioning_enabled: Number(document.getElementById("p-captioning").value),
+      caption_policy: document.getElementById("p-caption-policy").value,
       enabled: Number(document.getElementById("p-enabled").value),
     };
     if (inputType !== "srt") {

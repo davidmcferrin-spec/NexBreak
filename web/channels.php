@@ -86,10 +86,11 @@ require __DIR__ . '/include/header.php';
         <option value="0">Off</option>
       </select>
     </label>
-    <label>Captioning
-      <select id="p-captioning">
-        <option value="0">Off</option>
-        <option value="1">On</option>
+    <label>Caption policy
+      <select id="p-caption-policy">
+        <option value="auto">Auto (preserve source CC, else ASR)</option>
+        <option value="force_asr">Force ASR (H.264+CC override)</option>
+        <option value="off">Off (no ASR; preserve source CC)</option>
       </select>
     </label>
     <label>Enabled
@@ -103,8 +104,9 @@ require __DIR__ . '/include/header.php';
     RTSP <code>server_push</code> needs an embedded RTSP server — not in v1 yet. Prefer <code>client_pull</code>.
   </p>
   <p class="warn-banner" style="margin-top:10px">
-    Captioning on/off is applied live (stops/starts Vosk only — no proc restart).
-    Input type / URL / SRT ports / feed / preview path changes need <code>nexbreak-proc@N</code> restart.
+    Caption policy is hot: Off/Auto/Force ASR may restart this channel’s pipeline when the
+    effective mode flips (preserve ↔ ASR insert). Force ASR re-encodes program video to H.264+CEA-608.
+    Input URL / SRT / feed / preview path changes still need <code>nexbreak-proc@N</code> restart.
   </p>
   <div class="bar" style="margin-top:12px">
     <button type="button" class="primary" id="btn-proc-save">Save</button>

@@ -179,6 +179,8 @@ def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
         v_ffmpeg = "libx264" if vcodec in ("h264", "avc", "libx264") else vcodec
         a_ffmpeg = "aac" if acodec in ("aac", "libfdk_aac") else acodec
         argv += [
+            "-map", "0:v:0?",
+            "-map", "0:a:0?",
             "-c:v", v_ffmpeg,
             "-preset", "veryfast",
             "-tune", "zerolatency",
@@ -190,7 +192,8 @@ def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
             "-ar", "48000",
         ]
     else:
-        argv += ["-c", "copy"]
+        # Remux all elementary streams so embedded captions (A/53 SEI / data) survive.
+        argv += ["-map", "0", "-c", "copy"]
 
     # MPEG-TS on stdout for tsp -I file -
     argv += ["-f", "mpegts", "-mpegts_flags", "+resend_headers", "pipe:1"]

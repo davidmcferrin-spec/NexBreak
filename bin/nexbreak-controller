@@ -146,6 +146,12 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 ch = row_to_dict(row)
                 assert ch is not None
+                from nexbreak_caption_policy import normalize_policy
+
+                policy = normalize_policy(
+                    ch.get("caption_policy"),
+                    captioning_enabled=ch.get("captioning_enabled"),
+                )
                 runtime = None
                 sock = control_sock_path(ch["service_name"])
                 try:
@@ -153,9 +159,12 @@ class Handler(BaseHTTPRequestHandler):
                 except FileNotFoundError:
                     runtime = {
                         "ok": True,
-                        "desired": bool(int(ch.get("captioning_enabled") or 0)),
+                        "desired": policy != "off",
                         "running": False,
-                        "bypassed": not bool(int(ch.get("captioning_enabled") or 0)),
+                        "bypassed": policy == "off",
+                        "policy": policy,
+                        "source_has_cc": None,
+                        "effective_mode": None,
                         "note": "proc not running",
                     }
                 except Exception as exc:  # noqa: BLE001
@@ -164,7 +173,8 @@ class Handler(BaseHTTPRequestHandler):
                     200,
                     {
                         "ok": True,
-                        "enabled": int(ch.get("captioning_enabled") or 0),
+                        "enabled": 0 if policy == "off" else 1,
+                        "policy": policy,
                         "runtime": runtime,
                     },
                 )
@@ -573,6 +583,7 @@ class Handler(BaseHTTPRequestHandler):
                     "scte35_pid",
                     "splice_udp_port",
                     "captioning_enabled",
+                    "caption_policy",
                     "preview_enabled",
                     "preview_path",
                     "local_feed_host",
@@ -582,6 +593,16 @@ class Handler(BaseHTTPRequestHandler):
                 fields = {k: body[k] for k in allowed if k in body}
                 if not fields:
                     self._send(400, {"ok": False, "error": "no updatable fields"})
+                    return
+                from nexbreak_caption_policy import apply_policy_fields, normalize_policy
+
+                fields = apply_policy_fields(fields)
+                if "caption_policy" in fields and fields["caption_policy"] not in (
+                    "off",
+                    "auto",
+                    "force_asr",
+                ):
+                    self._send(400, {"ok": False, "error": "invalid caption_policy"})
                     return
                 if "input_type" in fields and fields["input_type"] not in (
                     "rtsp",
@@ -637,6 +658,11 @@ class Handler(BaseHTTPRequestHandler):
                             if fields[key] in (True, 1, "1", "true", "on")
                             else 0
                         )
+                if "caption_policy" in fields:
+                    fields["caption_policy"] = normalize_policy(fields["caption_policy"])
+                    fields["captioning_enabled"] = (
+                        0 if fields["caption_policy"] == "off" else 1
+                    )
                 # Reject incomplete SRT caller/listener configs up front.
                 row = conn.execute(
                     "SELECT * FROM processing_channels WHERE id = ?", (cid,)
@@ -685,12 +711,15 @@ class Handler(BaseHTTPRequestHandler):
                     detail=json.dumps(fields),
                 )
                 hot = None
-                if "captioning_enabled" in fields:
+                if "caption_policy" in fields or "captioning_enabled" in fields:
                     sock = control_sock_path(row["service_name"])
                     try:
-                        hot = send_caption_set(
-                            sock, enabled=bool(int(fields["captioning_enabled"]))
-                        )
+                        if "caption_policy" in fields:
+                            hot = send_caption_set(sock, policy=fields["caption_policy"])
+                        else:
+                            hot = send_caption_set(
+                                sock, enabled=bool(int(fields["captioning_enabled"]))
+                            )
                     except FileNotFoundError:
                         hot = {"ok": False, "error": "proc not running — will apply on next start"}
                     except Exception as exc:  # noqa: BLE001
@@ -772,12 +801,25 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path.startswith("/v1/processing/") and path.endswith("/captioning"):
-                # Dedicated hot toggle: persist + signal running proc (no restart).
+                # Persist policy + signal running proc (may restart pipeline on mode flip).
                 cid = int(path.split("/")[3])
-                if "enabled" not in body:
-                    self._send(400, {"ok": False, "error": "enabled required"})
+                from nexbreak_caption_policy import (
+                    enabled_from_policy,
+                    normalize_policy,
+                )
+
+                if "policy" in body and body["policy"] is not None:
+                    policy = normalize_policy(body["policy"])
+                elif "enabled" in body:
+                    policy = (
+                        "auto"
+                        if body["enabled"] in (True, 1, "1", "true", "on")
+                        else "off"
+                    )
+                else:
+                    self._send(400, {"ok": False, "error": "policy or enabled required"})
                     return
-                enabled = 1 if body["enabled"] in (True, 1, "1", "true", "on") else 0
+                enabled = enabled_from_policy(policy)
                 row = conn.execute(
                     "SELECT * FROM processing_channels WHERE id = ?", (cid,)
                 ).fetchone()
@@ -785,19 +827,25 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(404, {"ok": False, "error": "not found"})
                     return
                 conn.execute(
-                    "UPDATE processing_channels SET captioning_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (enabled, cid),
+                    """
+                    UPDATE processing_channels
+                    SET caption_policy = ?, captioning_enabled = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (policy, enabled, cid),
                 )
                 conn.commit()
                 sock = control_sock_path(row["service_name"])
                 try:
-                    result = send_caption_set(sock, enabled=bool(enabled))
+                    result = send_caption_set(sock, policy=policy)
                 except FileNotFoundError:
                     result = {
                         "ok": True,
-                        "desired": bool(enabled),
+                        "desired": policy != "off",
                         "running": False,
-                        "bypassed": not bool(enabled),
+                        "bypassed": policy == "off",
+                        "policy": policy,
                         "note": "proc not running — persisted; applies on next start",
                     }
                 except Exception as exc:  # noqa: BLE001
@@ -809,9 +857,12 @@ class Handler(BaseHTTPRequestHandler):
                     processing_channel_id=cid,
                     source_ip=self.client_address[0],
                     result="success" if result.get("ok") else "failure",
-                    detail=f"captioning_enabled={enabled} hot={json.dumps(result)}",
+                    detail=f"caption_policy={policy} hot={json.dumps(result)}",
                 )
-                self._send(200, {"ok": True, "enabled": enabled, "runtime": result})
+                self._send(
+                    200,
+                    {"ok": True, "enabled": enabled, "policy": policy, "runtime": result},
+                )
                 return
 
             self._send(404, {"ok": False, "error": f"unknown path {path}"})

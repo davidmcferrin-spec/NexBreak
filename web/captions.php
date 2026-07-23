@@ -8,16 +8,20 @@ require __DIR__ . '/include/header.php';
 <div class="page-header">
   <div>
     <h1>Captions</h1>
-    <p class="sub">Shared lexicon/blacklist · per-stream ASR on/off (Vosk bypass)</p>
+    <p class="sub">Program CC policy (egress) · shared lexicon/blacklist · Preview overlay is separate</p>
   </div>
   <button type="button" id="btn-refresh-channels">Refresh channels</button>
 </div>
 
 <section class="panel">
-  <h2>Per-stream captioning</h2>
+  <h2>Per-stream caption policy</h2>
   <p class="warn-banner" style="margin-bottom:10px">
-    Off = bypass: Vosk process stopped for that stream only. Ingest, splice, preview, and
-    other channels are untouched. Toggle is hot — no <code>nexbreak-proc</code> restart.
+    <strong>Auto</strong> — preserve source closed captions when present; otherwise insert ASR (CEA-608 CC1)
+    into the program feed for SRT egress.
+    <strong>Force ASR</strong> — always insert ASR (re-encodes that channel to H.264+A53; replaces source CC).
+    <strong>Off</strong> — no ASR; source CC still preserved on remux.
+    Policy changes that flip preserve ↔ insert restart that channel’s pipeline only.
+    Preview page <em>CC</em> toggle is display-only overlay, not this policy.
   </p>
   <div id="cap-channels"><div class="empty">Loading…</div></div>
 </section>

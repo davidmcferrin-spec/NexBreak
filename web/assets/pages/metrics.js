@@ -134,7 +134,7 @@
                 "</td><td>" +
                 api.esc(c.input_type) +
                 "</td><td>" +
-                (Number(c.captioning_enabled) ? "on" : "off") +
+                (c.caption_policy || (Number(c.captioning_enabled) ? "auto" : "off")) +
                 "</td><td>" +
                 (Number(c.enabled) ? "yes" : "no") +
                 "</td></tr>"

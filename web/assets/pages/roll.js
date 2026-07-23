@@ -161,31 +161,37 @@
         bar.appendChild(b);
       });
 
-      var asrOn = Number(ch.captioning_enabled) === 1;
+      var asrPolicy = ch.caption_policy || (Number(ch.captioning_enabled) ? "auto" : "off");
       var asrBtn = document.createElement("button");
       asrBtn.type = "button";
-      asrBtn.textContent = asrOn ? "ASR ON" : "ASR";
-      asrBtn.className = asrOn ? "primary" : "";
-      asrBtn.title = "Toggle live ASR caption generation for this stream (Vosk)";
+      asrBtn.textContent =
+        asrPolicy === "force_asr" ? "Force ASR" : asrPolicy === "off" ? "CC Off" : "CC Auto";
+      asrBtn.className = asrPolicy === "off" ? "" : "primary";
+      asrBtn.title =
+        "Cycle caption policy: Auto → Force ASR → Off. Force ASR inserts CEA-608 on egress (H.264).";
       asrBtn.addEventListener("click", async function () {
-        var next = !asrOn;
+        var order = ["auto", "force_asr", "off"];
+        var idx = order.indexOf(asrPolicy);
+        var next = order[(idx + 1) % order.length];
         asrBtn.disabled = true;
         var res = await api.post("/v1/processing/" + ch.id + "/captioning", {
-          enabled: next ? 1 : 0,
+          policy: next,
         });
         asrBtn.disabled = false;
         if (!res.ok || !res.data || !res.data.ok) {
-          api.toast((res.data && res.data.error) || "Caption toggle failed", "error");
+          api.toast((res.data && res.data.error) || "Caption policy failed", "error");
           return;
         }
-        asrOn = next;
-        asrBtn.textContent = asrOn ? "ASR ON" : "ASR";
-        asrBtn.className = asrOn ? "primary" : "";
+        asrPolicy = next;
+        asrBtn.textContent =
+          asrPolicy === "force_asr" ? "Force ASR" : asrPolicy === "off" ? "CC Off" : "CC Auto";
+        asrBtn.className = asrPolicy === "off" ? "" : "primary";
         var rt = res.data.runtime || {};
         api.toast(
-          asrOn
-            ? "ASR on · Vosk " + (rt.running ? "running" : "starting")
-            : "ASR bypassed · Vosk stopped",
+          "Policy " +
+            asrPolicy +
+            (rt.effective_mode ? " · " + rt.effective_mode : "") +
+            (rt.source_has_cc != null ? " · source CC " + (rt.source_has_cc ? "yes" : "no") : ""),
           "success"
         );
       });

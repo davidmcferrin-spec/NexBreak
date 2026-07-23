@@ -2,6 +2,18 @@
 (function () {
   var api = window.NexBreakAPI;
 
+  var POLICIES = [
+    { value: "auto", label: "Auto" },
+    { value: "force_asr", label: "Force ASR" },
+    { value: "off", label: "Off" },
+  ];
+
+  function policyOf(ch, data) {
+    if (data && data.policy) return data.policy;
+    if (ch.caption_policy) return ch.caption_policy;
+    return Number(ch.captioning_enabled) ? "auto" : "off";
+  }
+
   async function loadChannels() {
     var el = document.getElementById("cap-channels");
     var res = await api.get("/v1/processing");
@@ -25,56 +37,70 @@
 
     el.innerHTML =
       '<table class="data"><thead><tr>' +
-      "<th>Channel</th><th>Desired</th><th>Vosk</th><th>Bypass</th><th></th>" +
+      "<th>Channel</th><th>Policy</th><th>Effective</th><th>Source CC</th><th>ASR</th><th></th>" +
       "</tr></thead><tbody>" +
       statuses
         .map(function (s) {
           var rt = (s.data && s.data.runtime) || {};
-          var enabled = Number((s.data && s.data.enabled) || 0) === 1;
+          var policy = policyOf(s.ch, s.data);
+          var effective = rt.effective_mode || "—";
+          var src =
+            rt.source_has_cc == null ? "—" : rt.source_has_cc ? "yes" : "no";
           var running = !!rt.running;
-          var bypassed = rt.bypassed != null ? !!rt.bypassed : !enabled;
+          var opts = POLICIES.map(function (p) {
+            return (
+              '<option value="' +
+              p.value +
+              '"' +
+              (p.value === policy ? " selected" : "") +
+              ">" +
+              p.label +
+              "</option>"
+            );
+          }).join("");
           return (
             "<tr><td><strong>" +
             api.esc(s.ch.name) +
             '</strong> <span class="muted">@' +
             api.esc(s.ch.service_name) +
             "</span></td><td>" +
-            (enabled
-              ? '<span class="badge ok">on</span>'
-              : '<span class="badge dim">off</span>') +
+            '<select data-policy-for="' +
+            s.id +
+            '">' +
+            opts +
+            "</select></td><td>" +
+            api.esc(String(effective)) +
+            "</td><td>" +
+            api.esc(String(src)) +
             "</td><td>" +
             (running
               ? '<span class="badge ok">running</span>'
               : '<span class="badge dim">stopped</span>') +
-            "</td><td>" +
-            (bypassed
-              ? '<span class="badge warn">bypassed</span>'
-              : '<span class="badge ok">active</span>') +
-            '</td><td><button type="button" data-cap="' +
+            '</td><td><button type="button" class="primary" data-apply="' +
             s.id +
-            '" data-next="' +
-            (enabled ? "0" : "1") +
-            '">' +
-            (enabled ? "Turn off / bypass" : "Turn on") +
-            "</button></td></tr>"
+            '">Apply</button></td></tr>'
           );
         })
         .join("") +
       "</tbody></table>";
 
-    el.querySelectorAll("[data-cap]").forEach(function (btn) {
+    el.querySelectorAll("[data-apply]").forEach(function (btn) {
       btn.addEventListener("click", async function () {
-        var id = btn.getAttribute("data-cap");
-        var next = Number(btn.getAttribute("data-next"));
+        var id = btn.getAttribute("data-apply");
+        var sel = el.querySelector('[data-policy-for="' + id + '"]');
+        var policy = sel ? sel.value : "auto";
         btn.disabled = true;
-        var r = await api.post("/v1/processing/" + id + "/captioning", { enabled: next });
+        var r = await api.post("/v1/processing/" + id + "/captioning", { policy: policy });
         btn.disabled = false;
         if (!r.ok || !r.data || !r.data.ok) {
-          api.toast((r.data && r.data.error) || "Toggle failed", "error");
+          api.toast((r.data && r.data.error) || "Policy update failed", "error");
           return;
         }
+        var rt = r.data.runtime || {};
         api.toast(
-          next ? "Captions on — Vosk starting for this stream" : "Captions bypassed — Vosk stopped",
+          "Policy " +
+            policy +
+            (rt.effective_mode ? " · effective " + rt.effective_mode : ""),
           "success"
         );
         loadChannels();
@@ -151,29 +177,29 @@
   document.getElementById("lex-form").addEventListener("submit", async function (ev) {
     ev.preventDefault();
     var fd = new FormData(ev.target);
-    var res = await api.post("/v1/captions/lexicon", {
+    var r = await api.post("/v1/captions/lexicon", {
       word: fd.get("word"),
       phonetic: fd.get("phonetic"),
     });
-    if (!res.ok) {
-      api.toast((res.data && res.data.error) || "Add failed", "error");
+    if (!r.ok || !r.data || !r.data.ok) {
+      api.toast((r.data && r.data.error) || "Add failed", "error");
       return;
     }
     ev.target.reset();
-    api.toast("Lexicon entry added", "success");
+    api.toast("Added", "success");
     loadLex();
   });
 
   document.getElementById("bl-form").addEventListener("submit", async function (ev) {
     ev.preventDefault();
     var fd = new FormData(ev.target);
-    var res = await api.post("/v1/captions/blacklist", { word: fd.get("word") });
-    if (!res.ok) {
-      api.toast((res.data && res.data.error) || "Add failed", "error");
+    var r = await api.post("/v1/captions/blacklist", { word: fd.get("word") });
+    if (!r.ok || !r.data || !r.data.ok) {
+      api.toast((r.data && r.data.error) || "Add failed", "error");
       return;
     }
     ev.target.reset();
-    api.toast("Blacklist entry added", "success");
+    api.toast("Added", "success");
     loadBl();
   });
 
@@ -181,5 +207,4 @@
   loadChannels();
   loadLex();
   loadBl();
-  setInterval(loadChannels, 8000);
 })();

@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 """
-nexbreak-proc — processing channel (ingest → SCTE-35 spliceinject → local feed).
+nexbreak-proc — processing channel (ingest → optional CC inject → SCTE-35 → local feed).
 
 Pipeline:
   ffmpeg (RTSP/SRT/DeckLink → MPEG-TS stdout)
-    | tsp --add-input-stuffing
-        -P pmt (declare SCTE-35 PID)
-        -P spliceinject --udp 127.0.0.1:<splice_udp_port>
-        -O ip <local_feed_host>:<local_feed_port>
+    [| nexbreak-cc-inject  when effective_mode=asr_insert]
+    | tsp spliceinject → UDP local feed
 
-Control: Unix socket /run/nexbreak/proc-<service>.sock
-  JSON lines: {"cmd":"splice","splice_type":"...","hex_payload":null,"event_id":N}
-  Applies splice_insertion_delay_ms (except cancel), then UDP-sends XML/binary
-  to the spliceinject listener.
+Caption policy: off | auto | force_asr → effective off|preserve|asr_insert.
 """
 
 from __future__ import annotations
@@ -33,6 +28,13 @@ from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from nexbreak_caption_policy import (  # noqa: E402
+    cue_sock_path,
+    effective_mode,
+    enabled_from_policy,
+    normalize_policy,
+    probe_source_has_cc,
+)
 from nexbreak_captions import CaptionSidecar  # noqa: E402
 from nexbreak_db import (  # noqa: E402
     audit,
@@ -57,15 +59,19 @@ _stop = False
 _event_id = 1
 _channel: dict[str, Any] = {}
 _splice_udp = 0
-_procs: list[Popen] = []          # [ffmpeg_ingest, tsp] ONLY — never captions
-_preview: Optional[Popen] = None  # non-fatal sidecar
+_procs: list[Popen] = []  # core: ffmpeg [, inject], tsp
+_preview: Optional[Popen] = None
 _preview_argv: list[str] = []
 _preview_restart_at = 0.0
-_cc_watch: Optional[Popen] = None  # non-fatal CEA-608 → UI overlay
+_cc_watch: Optional[Popen] = None
 _cc_watch_argv: list[str] = []
 _cc_watch_restart_at = 0.0
 _captions: Optional[CaptionSidecar] = None
 _db_path: Optional[str] = None
+_source_has_cc = False
+_effective_mode = "off"
+_pipeline_restart = False
+_next_probe_at = 0.0
 
 
 def _handle_signal(signum, _frame):
@@ -74,11 +80,28 @@ def _handle_signal(signum, _frame):
     _stop = True
 
 
-def _kill_pipeline() -> None:
-    global _preview, _cc_watch, _captions
-    if _captions is not None:
+def _policy() -> str:
+    return normalize_policy(
+        _channel.get("caption_policy"),
+        captioning_enabled=_channel.get("captioning_enabled"),
+    )
+
+
+def _refresh_effective_mode() -> str:
+    global _effective_mode
+    _effective_mode = effective_mode(_policy(), _source_has_cc)
+    return _effective_mode
+
+
+def _stop_media(*, stop_captions: bool = False) -> None:
+    """Stop ffmpeg/inject/tsp + preview/cc-watch. Optionally stop ASR worker."""
+    global _preview, _cc_watch, _captions, _preview_argv, _cc_watch_argv
+    if stop_captions and _captions is not None:
         _captions.shutdown()
         _captions = None
+    elif _captions is not None:
+        _captions.set_asr_desired(False)
+
     for p in reversed(_procs):
         if p.poll() is None:
             p.terminate()
@@ -96,17 +119,29 @@ def _kill_pipeline() -> None:
                 p.kill()
     _procs.clear()
     _preview = None
+    _preview_argv = []
     _cc_watch = None
+    _cc_watch_argv = []
+
+
+def _kill_pipeline() -> None:
+    _stop_media(stop_captions=True)
 
 
 def _start_captions(channel: dict[str, Any]) -> None:
-    """Start caption sidecar only when captioning_enabled — never fatal."""
     global _captions
-    _captions = CaptionSidecar(channel, db_path=_db_path)
-    want = bool(int(channel.get("captioning_enabled") or 0))
-    _captions.set_enabled(want)
-    if not want:
-        log.info("captions bypassed at start (captioning_enabled=0)")
+    if _captions is None:
+        _captions = CaptionSidecar(channel, db_path=_db_path)
+    _captions.set_policy(_policy())
+    want_asr = _effective_mode == "asr_insert"
+    _captions.set_asr_desired(want_asr)
+    if not want_asr:
+        log.info(
+            "ASR worker not required (policy=%s effective=%s source_cc=%s)",
+            _policy(),
+            _effective_mode,
+            _source_has_cc,
+        )
 
 
 def _start_preview(channel: dict[str, Any], ffmpeg: str) -> None:
@@ -122,13 +157,11 @@ def _start_preview(channel: dict[str, Any], ffmpeg: str) -> None:
         preview_path=path,
     )
     log.info("preview: %s", " ".join(_preview_argv))
-    # Let ingest+tsp publish PAT/PMT (+ preferably a keyframe) before preview attaches.
     time.sleep(1.5)
     _preview = Popen(_preview_argv)
 
 
 def _ensure_preview() -> None:
-    """Restart preview sidecar if it exited (MediaMTX bounce, etc.)."""
     global _preview, _preview_restart_at
     if not _preview_argv:
         return
@@ -144,7 +177,6 @@ def _ensure_preview() -> None:
 
 
 def _start_cc_watch(channel: dict[str, Any]) -> None:
-    """Extract embedded captions from the local feed for Preview/Roll overlay."""
     global _cc_watch, _cc_watch_argv
     if not int(channel.get("preview_enabled") if channel.get("preview_enabled") is not None else 1):
         return
@@ -182,6 +214,117 @@ def _ensure_cc_watch() -> None:
     _cc_watch = Popen(_cc_watch_argv)
 
 
+def _inject_script() -> Path:
+    return Path(__file__).resolve().parent / "nexbreak-cc-inject"
+
+
+def _start_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
+    global _source_has_cc, _next_probe_at
+    bins = require_bins("ffmpeg", "tsp")
+    feed_host = channel["local_feed_host"] or "127.0.0.1"
+    feed_port = int(channel["local_feed_port"])
+
+    _source_has_cc = probe_source_has_cc(channel)
+    _next_probe_at = time.time() + 30.0
+    mode = _refresh_effective_mode()
+    log.info(
+        "caption policy=%s source_has_cc=%s effective=%s",
+        _policy(),
+        _source_has_cc,
+        mode,
+    )
+
+    ff_argv = ffmpeg_ingest_argv(channel, bins["ffmpeg"])
+    tsp_argv = tsp_splice_argv(
+        channel,
+        bins["tsp"],
+        splice_udp_port=splice_udp,
+        feed_host=feed_host,
+        feed_port=feed_port,
+    )
+    log.info("ffmpeg: %s", " ".join(ff_argv))
+    log.info("tsp: %s", " ".join(tsp_argv))
+
+    ff = Popen(ff_argv, stdout=PIPE, stderr=None)
+    if mode == "asr_insert":
+        inject_path = _inject_script()
+        if not inject_path.is_file():
+            raise RuntimeError(f"missing {inject_path}")
+        cue = cue_sock_path(str(channel["service_name"]))
+        inj_argv = [
+            sys.executable,
+            str(inject_path),
+            "--cue-sock",
+            cue,
+        ]
+        log.info("cc-inject: %s", " ".join(inj_argv))
+        inj = Popen(inj_argv, stdin=ff.stdout, stdout=PIPE, stderr=None)
+        if ff.stdout is not None:
+            ff.stdout.close()
+        tsp = Popen(tsp_argv, stdin=inj.stdout, stderr=None)
+        if inj.stdout is not None:
+            inj.stdout.close()
+        _procs.extend([ff, inj, tsp])
+    else:
+        tsp = Popen(tsp_argv, stdin=ff.stdout, stderr=None)
+        if ff.stdout is not None:
+            ff.stdout.close()
+        _procs.extend([ff, tsp])
+
+    try:
+        _start_preview(channel, bins["ffmpeg"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("preview publisher failed to start (non-fatal): %s", exc)
+    try:
+        _start_cc_watch(channel)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cc-watch failed to start (non-fatal): %s", exc)
+    try:
+        _start_captions(channel)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("caption sidecar failed to start (non-fatal): %s", exc)
+
+
+def _restart_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
+    log.info("restarting media pipeline for caption mode change")
+    _stop_media(stop_captions=False)
+    time.sleep(0.4)
+    _start_pipeline(channel, splice_udp)
+
+
+def _watch_pipeline() -> Optional[int]:
+    """Return exit code if a core child died; None if still healthy."""
+    global _source_has_cc, _pipeline_restart, _next_probe_at
+    for p in _procs:
+        code = p.poll()
+        if code is not None:
+            return code
+    _ensure_preview()
+    _ensure_cc_watch()
+    if _captions is not None:
+        _captions.tick()
+
+    now = time.time()
+    if now >= _next_probe_at and _channel:
+        _next_probe_at = now + 30.0
+        if _policy() == "auto":
+            prev = _source_has_cc
+            try:
+                _source_has_cc = probe_source_has_cc(_channel, timeout=5.0)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("CC re-probe failed: %s", exc)
+            else:
+                new_mode = effective_mode("auto", _source_has_cc)
+                if new_mode != _effective_mode or prev != _source_has_cc:
+                    log.info(
+                        "CC probe changed source_has_cc %s→%s — scheduling restart",
+                        prev,
+                        _source_has_cc,
+                    )
+                    _pipeline_restart = True
+    return None
+
+
 def _send_to_spliceinject(payload: bytes) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -206,7 +349,6 @@ def _apply_splice(
         delay_ms = 0
     if not skip_delay and delay_ms > 0:
         log.info("splice %s event_id=%s — waiting %s ms", splice_type, eid, delay_ms)
-        # Sleep in slices so SIGTERM can abort promptly
         end = time.time() + delay_ms / 1000.0
         while not _stop and time.time() < end:
             time.sleep(min(0.1, end - time.time()))
@@ -227,8 +369,25 @@ def _apply_splice(
     return {"ok": True, "event_id": eid, "detail": detail, "delay_ms": delay_ms}
 
 
+def _caption_runtime() -> dict[str, Any]:
+    cap = (
+        _captions.status()
+        if _captions
+        else {"desired": False, "running": False, "bypassed": True}
+    )
+    return {
+        "ok": True,
+        **cap,
+        "policy": _policy(),
+        "source_has_cc": _source_has_cc,
+        "effective_mode": _effective_mode,
+        "inject_active": _effective_mode == "asr_insert",
+    }
+
+
 class _ControlHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
+        global _pipeline_restart, _channel, _captions
         try:
             line = self.rfile.readline()
             if not line:
@@ -243,9 +402,6 @@ class _ControlHandler(socketserver.StreamRequestHandler):
             self._reply({"ok": True, "service": _channel.get("service_name")})
             return
         if cmd == "status":
-            cap = _captions.status() if _captions else {
-                "desired": False, "running": False, "bypassed": True
-            }
             self._reply(
                 {
                     "ok": True,
@@ -256,24 +412,34 @@ class _ControlHandler(socketserver.StreamRequestHandler):
                     "preview_path": preview_path_for(_channel) if _channel else None,
                     "preview_alive": _preview is not None and _preview.poll() is None,
                     "pipeline_alive": all(p.poll() is None for p in _procs) if _procs else False,
-                    "captions": cap,
+                    "captions": _caption_runtime(),
                 }
             )
             return
         if cmd == "caption_set":
-            # Hot toggle — stops/starts Vosk without touching ingest/splice.
             if _captions is None:
-                self._reply({"ok": False, "error": "caption sidecar not initialized"})
+                _captions = CaptionSidecar(_channel, db_path=_db_path)
+            old_mode = _effective_mode
+            if "policy" in req and req["policy"] is not None:
+                pol = normalize_policy(req["policy"])
+            elif "enabled" in req:
+                pol = "auto" if bool(req.get("enabled")) else "off"
+            else:
+                self._reply({"ok": False, "error": "policy or enabled required"})
                 return
-            enabled = bool(req.get("enabled"))
-            result = _captions.set_enabled(enabled)
-            self._reply(result)
+            _channel["caption_policy"] = pol
+            _channel["captioning_enabled"] = enabled_from_policy(pol)
+            _captions.set_policy(pol)
+            new_mode = _refresh_effective_mode()
+            if new_mode != old_mode:
+                _pipeline_restart = True
+                log.info("caption mode %s→%s — pipeline restart queued", old_mode, new_mode)
+            else:
+                _captions.set_asr_desired(new_mode == "asr_insert")
+            self._reply(_caption_runtime())
             return
         if cmd == "caption_status":
-            if _captions is None:
-                self._reply({"ok": True, "desired": False, "running": False, "bypassed": True})
-                return
-            self._reply({"ok": True, **_captions.status()})
+            self._reply(_caption_runtime())
             return
         if cmd == "splice":
             try:
@@ -310,56 +476,8 @@ def _start_control_server(sock_path: str) -> _ThreadingUnixServer:
     return server
 
 
-def _start_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
-    bins = require_bins("ffmpeg", "tsp")
-    feed_host = channel["local_feed_host"] or "127.0.0.1"
-    feed_port = int(channel["local_feed_port"])
-
-    ff_argv = ffmpeg_ingest_argv(channel, bins["ffmpeg"])
-    tsp_argv = tsp_splice_argv(
-        channel,
-        bins["tsp"],
-        splice_udp_port=splice_udp,
-        feed_host=feed_host,
-        feed_port=feed_port,
-    )
-    log.info("ffmpeg: %s", " ".join(ff_argv))
-    log.info("tsp: %s", " ".join(tsp_argv))
-
-    ff = Popen(ff_argv, stdout=PIPE, stderr=None)
-    tsp = Popen(tsp_argv, stdin=ff.stdout, stderr=None)
-    if ff.stdout is not None:
-        ff.stdout.close()  # tsp owns the pipe
-    _procs.extend([ff, tsp])
-    try:
-        _start_preview(channel, bins["ffmpeg"])
-    except Exception as exc:  # noqa: BLE001
-        log.warning("preview publisher failed to start (non-fatal): %s", exc)
-    try:
-        _start_cc_watch(channel)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("cc-watch failed to start (non-fatal): %s", exc)
-    try:
-        _start_captions(channel)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("caption sidecar failed to start (non-fatal): %s", exc)
-
-
-def _watch_pipeline() -> Optional[int]:
-    """Return exit code if a core child (ingest/tsp) died; None if still healthy."""
-    for p in _procs:
-        code = p.poll()
-        if code is not None:
-            return code
-    _ensure_preview()
-    _ensure_cc_watch()
-    if _captions is not None:
-        _captions.tick()
-    return None
-
-
 def main() -> int:
-    global _channel, _splice_udp, _stop, _db_path
+    global _channel, _splice_udp, _stop, _db_path, _pipeline_restart
 
     parser = argparse.ArgumentParser(description="NexBreak processing channel")
     parser.add_argument("--service-name", required=True)
@@ -397,14 +515,21 @@ def main() -> int:
         ppath = preview_path_for(channel)
 
         log.info(
-            "plan: %s type=%s delay_ms=%s feed=%s:%s splice_udp=%s preview=%s sock=%s",
+            "plan: %s type=%s delay_ms=%s feed=%s:%s splice_udp=%s preview=%s "
+            "caption_policy=%s sock=%s",
             channel["name"],
             channel["input_type"],
             channel["splice_insertion_delay_ms"],
             channel["local_feed_host"],
             channel["local_feed_port"],
             _splice_udp,
-            ppath if int(channel.get("preview_enabled") if channel.get("preview_enabled") is not None else 1) else "off",
+            ppath
+            if int(channel.get("preview_enabled") if channel.get("preview_enabled") is not None else 1)
+            else "off",
+            normalize_policy(
+                channel.get("caption_policy"),
+                captioning_enabled=channel.get("captioning_enabled"),
+            ),
             sock_path,
         )
 
@@ -441,8 +566,6 @@ def main() -> int:
         try:
             _start_pipeline(channel, _splice_udp)
         except ValueError as exc:
-            # Bad channel config — do not exit/restart-loop (spam journal).
-            # Stay idle until operator fixes Channels and restarts the unit.
             log.error("failed to start pipeline (config): %s", exc)
             audit(
                 conn,
@@ -483,12 +606,27 @@ def main() -> int:
             detail=(
                 f"nexbreak-proc@{args.service_name} pipeline up; "
                 f"feed {channel['local_feed_host']}:{channel['local_feed_port']}; "
-                f"splice_udp {_splice_udp}; preview {ppath}"
+                f"splice_udp {_splice_udp}; preview {ppath}; "
+                f"caption_policy={_policy()} effective={_effective_mode}"
             ),
         )
 
         rc = 0
         while not _stop:
+            if _pipeline_restart:
+                _pipeline_restart = False
+                try:
+                    _restart_pipeline(_channel, _splice_udp)
+                    audit(
+                        conn,
+                        event_type="config_change",
+                        processing_channel_id=channel["id"],
+                        detail=f"pipeline restart effective_mode={_effective_mode}",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("pipeline restart failed: %s", exc)
+                    rc = 1
+                    break
             dead = _watch_pipeline()
             if dead is not None:
                 log.error("pipeline child exited code=%s — stopping", dead)

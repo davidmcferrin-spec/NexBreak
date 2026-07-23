@@ -34,10 +34,12 @@ inputs and outputs. DeckLink SDI-out is architected for but deferred past v1.
   - Shared phonetic lexicon library (accuracy): feeds the ASR engine's
     pronunciation dictionary to improve recognition before transcription,
     not a post-hoc correction pass.
-  - **Per-stream hot bypass:** `captioning_enabled=0` (UI / API) stops the
-    Vosk worker for that stream only and leaves the MPEG-TS path untouched.
-    Captioning is a non-fatal sidecar — crash or stop never restarts or
-    kills `nexbreak-proc` ingest/splice. Other channels are unaffected.
+  - **Per-stream caption policy** (`caption_policy`): `off` | `auto` | `force_asr`.
+    Auto preserves source CEA when present, otherwise ASR-inserts CEA-608 CC1
+    (A/53) into the program feed for SRT egress. Force ASR always inserts
+    (H.264+A53 re-encode for that channel). Off stops ASR but still remux-
+    preserves source CC. Vosk crash never kills ingest/splice; inject is on
+    the core path only while `effective_mode=asr_insert`.
 - Software stream router: each input's processed feed (post-splice,
   post-caption) is decoupled from any specific output. The routing table
   assigns processed feeds to egress adapters — not fixed 1-in/1-out.
@@ -158,16 +160,17 @@ Done:
 - `nexbreak-controller` REST API; splice fan-out via `/run/nexbreak/proc-*.sock`
 - `nexbreak-proc`: ffmpeg RTSP/SRT ingest → tsp spliceinject → UDP feed
   + MediaMTX RTSP preview publisher (WHEP)
-  + caption/Vosk sidecar (hot on/off bypass; never fatal to core pipeline)
+  + caption policy (auto preserve / force ASR / off) with CEA-608 A/53 insert
+    into the local feed when ASR is required; Vosk sidecar + cc-inject
 - `nexbreak-egress`: UDP local feed → SRT (ffmpeg)
-- `web/` UI: Dashboard, Roll (with live preview + CC toggle), Preview,
+- `web/` UI: Dashboard, Roll (with live preview + CC overlay + policy cycle), Preview,
   Channels (processing + egress editors), Router, Captions, Services
   (systemd/journal via allowlisted sudo wrappers), Metrics (audit-derived
   splice/config/routing activity), Audit; `/api` PHP proxy to controller
 
 Next:
 - Hardware bring-up of channel 1 against a real RTSP source
-- Caption audio tap + CEA-608/708 insert into the local feed
 - Optional: replace sudoers ops wrappers with Unix-socket privileged helper
 - HLS egress mode
 - TLS on MediaMTX when UI is HTTPS (same NexVUE pattern)
+- CEA-708 service layer (CC1 A/53 shipped first)

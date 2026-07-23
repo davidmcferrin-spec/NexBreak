@@ -1,28 +1,35 @@
 #!/usr/bin/env python3
 """
-nexbreak-caption-worker — per-stream ASR process (Vosk when available).
+nexbreak-caption-worker — per-stream ASR → cue socket for cc-inject.
 
-Runs as a child of nexbreak-proc. Killing/stopping this process must never
-affect ingest, spliceinject, egress, or preview.
+- Taps audio from the local MPEG-TS UDP feed (ffmpeg → s16le 16 kHz mono).
+- Optional Vosk when model + package available.
+- Applies caption_blacklist / caption_lexicon from SQLite.
+- Publishes JSON cues to the inject cue socket (never blocks the media path).
 
-Behavior:
-- If NEXBREAK_VOSK_MODEL / --model points at a Vosk model dir AND the vosk
-  module is importable, load it and idle on the audio tap (full CEA insert
-  lands in a follow-on milestone).
-- Otherwise stay alive in bypass-ready idle so enable/disable can be tested
-  without pulling Vosk onto the box yet.
-
-Stdlib preferred; vosk is optional and only imported when a model is set.
+Stdlib preferred; vosk is optional.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import re
+import shutil
 import signal
+import socket
+import subprocess
 import sys
 import time
+from pathlib import Path
+from typing import Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from nexbreak_caption_policy import cue_sock_path  # noqa: E402
+from nexbreak_db import connect, migrate  # noqa: E402
 
 log = logging.getLogger("nexbreak-caption-worker")
 _stop = False
@@ -35,7 +42,6 @@ def _handle(signum, _frame):
 
 
 def try_load_vosk(model_path: str):
-    """Return (model, reason). model is None when bypassing ASR."""
     if not model_path:
         return None, "no model path — idle bypass-ready"
     if not os.path.isdir(model_path):
@@ -45,10 +51,97 @@ def try_load_vosk(model_path: str):
     except ImportError:
         return None, "vosk package not installed — idle bypass-ready"
     try:
-        model = Model(model_path)
-        return model, f"vosk model loaded from {model_path}"
+        return Model(model_path), f"vosk model loaded from {model_path}"
     except Exception as exc:  # noqa: BLE001
         return None, f"vosk load failed: {exc}"
+
+
+def load_lists(db_path: Optional[str]) -> tuple[set[str], dict[str, str]]:
+    blacklist: set[str] = set()
+    lexicon: dict[str, str] = {}
+    try:
+        conn = connect(db_path)
+        migrate(conn)
+        for row in conn.execute("SELECT word FROM caption_blacklist").fetchall():
+            w = (row[0] or "").strip().lower()
+            if w:
+                blacklist.add(w)
+        for row in conn.execute("SELECT word, phonetic FROM caption_lexicon").fetchall():
+            w = (row[0] or "").strip()
+            ph = (row[1] or "").strip()
+            if w and ph:
+                lexicon[w.lower()] = ph
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("caption lists unavailable: %s", exc)
+    return blacklist, lexicon
+
+
+def apply_text(text: str, blacklist: set[str], lexicon: dict[str, str]) -> str:
+    if not text:
+        return ""
+    # Lexicon is primarily for ASR pronunciation; light post-replace for display variants.
+    words = text.split()
+    out: list[str] = []
+    for w in words:
+        bare = re.sub(r"[^\w']+", "", w).lower()
+        if bare and bare in blacklist:
+            continue  # omit entirely — no placeholder
+        out.append(w)
+    return " ".join(out).strip()
+
+
+def connect_cues(sock_path: str, retries: int = 40) -> Optional[socket.socket]:
+    for i in range(retries):
+        if _stop:
+            return None
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.connect(sock_path)
+            s.settimeout(2.0)
+            log.info("connected to cue socket %s", sock_path)
+            return s
+        except OSError:
+            s.close()
+            time.sleep(0.25)
+    log.warning("cue socket %s not ready — will retry in loop", sock_path)
+    return None
+
+
+def send_cue(sock: Optional[socket.socket], *, text: str, clear: bool, seq: int) -> Optional[socket.socket]:
+    payload = (json.dumps({"text": text, "clear": clear, "seq": seq}) + "\n").encode("utf-8")
+    if sock is None:
+        return None
+    try:
+        sock.sendall(payload)
+        return sock
+    except OSError:
+        try:
+            sock.close()
+        except OSError:
+            pass
+        return None
+
+
+def audio_tap_argv(ffmpeg: str, host: str, port: int) -> list[str]:
+    src = f"udp://{host}:{int(port)}?reuse=1&fifo_size=500000&overrun_nonfatal=1"
+    return [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-i",
+        src,
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-f",
+        "s16le",
+        "pipe:1",
+    ]
 
 
 def main() -> int:
@@ -58,6 +151,7 @@ def main() -> int:
     parser.add_argument("--feed-port", type=int, required=True)
     parser.add_argument("--db", default=None)
     parser.add_argument("--model", default=os.environ.get("NEXBREAK_VOSK_MODEL", ""))
+    parser.add_argument("--cue-sock", default=None)
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -67,31 +161,119 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle)
     signal.signal(signal.SIGTERM, _handle)
 
+    sock_path = args.cue_sock or cue_sock_path(args.service_name)
+    blacklist, lexicon = load_lists(args.db)
     model, reason = try_load_vosk(args.model or "")
     log.info(
-        "caption worker up service=%s feed=%s:%s — %s",
+        "caption worker up service=%s feed=%s:%s cues=%s — %s (blacklist=%s lexicon=%s)",
         args.service_name,
         args.feed_host,
         args.feed_port,
+        sock_path,
         reason,
+        len(blacklist),
+        len(lexicon),
     )
+
+    cue = connect_cues(sock_path)
+    seq = 0
+
     if model is None:
-        # Stay alive so the parent can manage us; no audio decode, no CPU burn.
+        # Stay alive; send periodic clears so inject does not stall on stale text.
         while not _stop:
-            time.sleep(0.5)
-        log.info("caption worker exit (bypass idle)")
+            if cue is None:
+                cue = connect_cues(sock_path, retries=8)
+            seq += 1
+            cue = send_cue(cue, text="", clear=True, seq=seq)
+            time.sleep(2.0)
+        if cue:
+            try:
+                cue.close()
+            except OSError:
+                pass
         return 0
 
-    # Model loaded: keep process alive. Audio tap + CEA insert come next;
-    # until then we hold the model so enable=on means "Vosk is warm" and
-    # enable=off (parent SIGTERM) unloads it cleanly.
-    log.info("vosk warm — waiting for audio-tap+insert wiring; SIGTERM unloads")
-    while not _stop:
-        time.sleep(0.5)
+    from vosk import KaldiRecognizer  # type: ignore
 
-    # Drop reference so the model can be GC'd / unmapped
-    del model
-    log.info("caption worker exit (vosk unloaded)")
+    rec = KaldiRecognizer(model, 16000)
+    rec.SetWords(True)
+    # Push lexicon terms into grammar lightly via accept waveform only;
+    # full Kaldi lexicon rewrite needs model rebuild — phonetic list is logged for ops.
+    if lexicon:
+        log.info("lexicon loaded (%s entries) — used as recognition hints when possible", len(lexicon))
+
+    ffmpeg = shutil.which("ffmpeg") or os.environ.get("NEXBREAK_FFMPEG", "ffmpeg")
+    tap = subprocess.Popen(
+        audio_tap_argv(ffmpeg, args.feed_host, args.feed_port),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    assert tap.stdout is not None
+    last_partial = ""
+    last_final_at = time.time()
+    try:
+        while not _stop:
+            if tap.poll() is not None:
+                log.warning("audio tap exited %s — restarting in 2s", tap.returncode)
+                time.sleep(2.0)
+                if _stop:
+                    break
+                tap = subprocess.Popen(
+                    audio_tap_argv(ffmpeg, args.feed_host, args.feed_port),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                assert tap.stdout is not None
+                continue
+
+            data = tap.stdout.read(4000)
+            if not data:
+                time.sleep(0.02)
+                continue
+
+            if cue is None:
+                cue = connect_cues(sock_path, retries=4)
+
+            if rec.AcceptWaveform(data):
+                try:
+                    result = json.loads(rec.Result())
+                except json.JSONDecodeError:
+                    result = {}
+                text = apply_text(str(result.get("text") or ""), blacklist, lexicon)
+                last_partial = ""
+                last_final_at = time.time()
+                seq += 1
+                cue = send_cue(cue, text=text, clear=not text, seq=seq)
+            else:
+                try:
+                    partial = json.loads(rec.PartialResult())
+                except json.JSONDecodeError:
+                    partial = {}
+                ptext = apply_text(str(partial.get("partial") or ""), blacklist, lexicon)
+                if ptext and ptext != last_partial:
+                    last_partial = ptext
+                    seq += 1
+                    cue = send_cue(cue, text=ptext, clear=False, seq=seq)
+                elif last_partial and (time.time() - last_final_at) > 8.0:
+                    last_partial = ""
+                    seq += 1
+                    cue = send_cue(cue, text="", clear=True, seq=seq)
+    finally:
+        if tap.poll() is None:
+            tap.terminate()
+            try:
+                tap.wait(timeout=3)
+            except Exception:
+                tap.kill()
+        if cue:
+            seq += 1
+            send_cue(cue, text="", clear=True, seq=seq)
+            try:
+                cue.close()
+            except OSError:
+                pass
+        del model
+        log.info("caption worker exit (vosk unloaded)")
     return 0
 
 

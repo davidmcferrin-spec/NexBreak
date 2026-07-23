@@ -3,14 +3,11 @@
 Per-stream caption/Vosk sidecar — isolated from the critical ingest→splice path.
 
 Design rules (stability):
-- Captioning NEVER shares fate with ffmpeg|tsp. A Vosk crash must not restart
-  or kill nexbreak-proc's media pipeline.
+- Captioning NEVER shares fate with ffmpeg|tsp|cc-inject. A Vosk crash must not
+  restart or kill nexbreak-proc's media pipeline.
 - Off / bypass = process not running, model not loaded, zero ASR CPU.
-- Hot toggle via CaptionSidecar.set_enabled() without touching core _procs.
-
-The worker itself lives in nexbreak-caption-worker (separate process). When
-Vosk is not installed or caption injection is not yet wired, the worker
-idles in "bypass-ready" mode so enable/disable semantics can be proven.
+- Hot toggle via CaptionSidecar.set_policy() without touching core _procs
+  (pipeline mode flips are handled by nexbreak-proc).
 """
 
 from __future__ import annotations
@@ -22,6 +19,8 @@ import time
 from pathlib import Path
 from subprocess import Popen
 from typing import Any, Optional
+
+from nexbreak_caption_policy import cue_sock_path, enabled_from_policy, normalize_policy
 
 log = logging.getLogger("nexbreak.captions")
 
@@ -58,26 +57,37 @@ class CaptionSidecar:
             "last_error": self._last_error,
             "channel_id": self.channel.get("id"),
             "service_name": self.channel.get("service_name"),
+            "policy": normalize_policy(
+                self.channel.get("caption_policy"),
+                captioning_enabled=self.channel.get("captioning_enabled"),
+            ),
+            "cue_sock": cue_sock_path(str(self.channel.get("service_name") or "x")),
         }
 
     def set_enabled(self, enabled: bool) -> dict[str, Any]:
-        """
-        Hot enable/disable. Disable stops Vosk immediately and prevents
-        auto-restart. Enable starts the worker (non-fatal on failure).
-        """
-        enabled = bool(enabled)
-        if enabled == self._desired and (enabled == self.alive or not enabled):
-            if not enabled:
+        """Back-compat: enabled True→auto, False→off."""
+        return self.set_policy("auto" if enabled else "off")
+
+    def set_policy(self, policy: str) -> dict[str, Any]:
+        pol = normalize_policy(policy)
+        self.channel["caption_policy"] = pol
+        self.channel["captioning_enabled"] = enabled_from_policy(pol)
+        # Worker runs only when ASR insert is intended by caller (proc sets desired).
+        return {"ok": True, **self.status()}
+
+    def set_asr_desired(self, desired: bool) -> dict[str, Any]:
+        """Start/stop worker for asr_insert effective mode."""
+        desired = bool(desired)
+        if desired == self._desired and (desired == self.alive or not desired):
+            if not desired:
                 self.stop(reason="already off")
             return {"ok": True, **self.status()}
 
-        self._desired = enabled
-        self.channel["captioning_enabled"] = 1 if enabled else 0
-
-        if not enabled:
-            self.stop(reason="operator bypass/off")
+        self._desired = desired
+        if not desired:
+            self.stop(reason="operator bypass/off or preserve mode")
             log.info(
-                "captions OFF for %s — Vosk stopped, stream bypasses ASR",
+                "ASR worker OFF for %s",
                 self.channel.get("service_name"),
             )
             return {"ok": True, **self.status()}
@@ -86,7 +96,6 @@ class CaptionSidecar:
         return {"ok": ok, **self.status()}
 
     def start(self) -> bool:
-        """Start worker if desired. Failures are logged; never raise to caller."""
         if not self._desired:
             return False
         if self.alive:
@@ -100,6 +109,8 @@ class CaptionSidecar:
             str(self.channel.get("local_feed_host") or "127.0.0.1"),
             "--feed-port",
             str(int(self.channel["local_feed_port"])),
+            "--cue-sock",
+            cue_sock_path(str(self.channel["service_name"])),
         ]
         if self.db_path:
             argv += ["--db", self.db_path]
@@ -119,7 +130,6 @@ class CaptionSidecar:
             return False
 
     def stop(self, reason: str = "") -> None:
-        """Terminate worker; clear restart intent when desired is false."""
         if self._proc is None:
             return
         proc = self._proc
@@ -137,10 +147,6 @@ class CaptionSidecar:
                     pass
 
     def tick(self) -> None:
-        """
-        Called from the proc main loop. If captions are desired and the worker
-        died, restart with backoff. Never signals the core pipeline.
-        """
         if not self._desired:
             return
         if self.alive:

@@ -64,9 +64,42 @@ def migrate(conn: sqlite3.Connection) -> None:
         alters.append(
             "ALTER TABLE processing_channels ADD COLUMN preview_path TEXT"
         )
+    added_policy = False
+    if "caption_policy" not in cols:
+        alters.append(
+            "ALTER TABLE processing_channels ADD COLUMN caption_policy TEXT NOT NULL DEFAULT 'auto'"
+        )
+        added_policy = True
     for stmt in alters:
         conn.execute(stmt)
     if alters:
+        conn.commit()
+    # Keep caption_policy ↔ captioning_enabled consistent (idempotent).
+    if "caption_policy" in _column_names(conn, "processing_channels"):
+        if added_policy:
+            # First introduction: derive policy from legacy enabled flag.
+            conn.execute(
+                """
+                UPDATE processing_channels
+                SET caption_policy = CASE
+                  WHEN COALESCE(captioning_enabled, 0) = 0 THEN 'off'
+                  ELSE 'auto'
+                END
+                """
+            )
+        conn.execute(
+            """
+            UPDATE processing_channels
+            SET caption_policy = 'auto'
+            WHERE IFNULL(caption_policy, '') NOT IN ('off', 'auto', 'force_asr')
+            """
+        )
+        conn.execute(
+            """
+            UPDATE processing_channels
+            SET captioning_enabled = CASE WHEN caption_policy = 'off' THEN 0 ELSE 1 END
+            """
+        )
         conn.commit()
 
 

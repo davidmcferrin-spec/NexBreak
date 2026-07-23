@@ -12,7 +12,7 @@ See `CLAUDE.md` for the full design record.
 - Up to 4 feeds (RTSP, SRT, DeckLink) → SRT/HLS egress
 - Manual SCTE-35 splice control per stream (Streamdeck / DNF / web Roll)
 - Operator-tunable trigger→insertion delay (pre-roll for GOP-aligned cues)
-- Shared caption lexicon + blacklist (ASR path still pending)
+- Shared caption lexicon + blacklist; caption policy auto/force ASR/off with CEA-608 on SRT
 - Software router between processed feeds and egress adapters
 
 ## Test environment
@@ -79,28 +79,29 @@ sudo ufw allow 8189 comment 'NexBreak WebRTC media'
 
 Set a real RTSP URL on Channels → Input 1, restart `nexbreak-proc@1`, open Preview.
 
-### Captioning / Vosk bypass (per stream)
+### Caption policy (per stream → SRT egress)
 
-Captions run as an **isolated sidecar** of `nexbreak-proc@N` — never in the
-fatal ffmpeg|tsp watch set.
-
-| Action | Effect |
+| Policy | Behavior |
 |---|---|
-| Off / bypass | Vosk worker SIGTERM'd; model unloaded; no ASR CPU |
-| On | Worker starts for that stream only |
-| Worker crash | Auto-restart with backoff; **ingest/splice keep running** |
+| `auto` | Preserve source CC when detected; else ASR → CEA-608 CC1 (A/53) on the program feed |
+| `force_asr` | Always ASR insert (channel re-encodes to H.264+A53 while active) |
+| `off` | No ASR; source CC still preserved on remux |
+
+ASR runs as an isolated worker (Vosk). Insert uses `nexbreak-cc-inject` on the
+core path only while `effective_mode=asr_insert`. Preview **CC** is a separate
+UI overlay (`ccextractor`), not the program caption service.
 
 ```bash
-# Hot toggle (no service restart):
+# Set policy (may restart that channel's pipeline on mode flip):
 curl -X POST http://127.0.0.1:8787/v1/processing/1/captioning \
-  -H 'Content-Type: application/json' -d '{"enabled":0}'
+  -H 'Content-Type: application/json' -d '{"policy":"force_asr"}'
 
-# Or Roll UI → CC ON/OFF, or Captions page → per-stream table
+# Legacy: {"enabled":0|1} maps to off|auto
 ```
 
 Optional model path: `NEXBREAK_VOSK_MODEL=/path/to/vosk-model` on the proc
-unit. Without it the worker idles in bypass-ready mode so enable/disable
-can still be validated.
+unit. Without it the worker idles (clears cues) so policy/inject can still be
+validated. Install `ccextractor` for Preview overlay + richer probes.
 
 ## Ubuntu bring-up
 
