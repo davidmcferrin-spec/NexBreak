@@ -7,6 +7,196 @@
     return v == null || v === "" ? 0 : Number(v);
   }
 
+  function fmtBytes(bytes) {
+    var b = Number(bytes);
+    if (!isFinite(b) || b < 0) return "—";
+    var units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    var i = 0;
+    while (b >= 1024 && i < units.length - 1) {
+      b /= 1024;
+      i++;
+    }
+    var digits = i === 0 ? 0 : b >= 100 ? 0 : b >= 10 ? 1 : 2;
+    return b.toFixed(digits) + " " + units[i];
+  }
+
+  function fmtUptime(sec) {
+    var s = Math.floor(Number(sec) || 0);
+    if (s < 0) return "—";
+    var d = Math.floor(s / 86400);
+    var h = Math.floor((s % 86400) / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    if (d > 0) return d + "d " + h + "h";
+    if (h > 0) return h + "h " + m + "m";
+    return m + "m";
+  }
+
+  function setMeter(id, pct) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (pct == null || !isFinite(pct)) {
+      el.hidden = true;
+      return;
+    }
+    var fill = el.querySelector(".meter-fill");
+    var p = Math.max(0, Math.min(100, Number(pct)));
+    el.hidden = false;
+    el.classList.toggle("warn", p >= 75 && p < 90);
+    el.classList.toggle("bad", p >= 90);
+    if (fill) fill.style.width = p.toFixed(1) + "%";
+  }
+
+  function renderHost(host) {
+    var meta = document.getElementById("host-meta");
+    var gpuEl = document.getElementById("host-gpu");
+    if (!host || host.available === false) {
+      meta.textContent =
+        (host && host.error) || "Host metrics unavailable (controller not on Linux?)";
+      ["h-cpu", "h-load", "h-mem", "h-swap", "h-disk", "h-uptime"].forEach(function (id) {
+        document.getElementById(id).textContent = "—";
+      });
+      ["h-cpu-meter", "h-mem-meter", "h-swap-meter", "h-disk-meter"].forEach(function (id) {
+        setMeter(id, null);
+      });
+      gpuEl.hidden = true;
+      gpuEl.innerHTML = "";
+      return;
+    }
+
+    var cpu = host.cpu || {};
+    var load = host.loadavg || {};
+    var mem = host.memory || {};
+    var disk = host.disk || {};
+    var cores = n(cpu.count);
+    var cpuPct = cpu.percent;
+    var cpuLabel =
+      cpuPct == null || cpuPct === ""
+        ? cores
+          ? cores + " cores"
+          : "—"
+        : Number(cpuPct).toFixed(1) + "%" + (cores ? " · " + cores + " cores" : "");
+    document.getElementById("h-cpu").textContent = cpuLabel;
+    setMeter("h-cpu-meter", cpuPct);
+
+    if (load["1m"] != null) {
+      document.getElementById("h-load").textContent =
+        load["1m"] + " / " + load["5m"] + " / " + load["15m"];
+    } else {
+      document.getElementById("h-load").textContent = "—";
+    }
+
+    if (mem.total_bytes) {
+      document.getElementById("h-mem").textContent =
+        fmtBytes(mem.used_bytes) +
+        " / " +
+        fmtBytes(mem.total_bytes) +
+        " (" +
+        Number(mem.percent).toFixed(1) +
+        "%)";
+      setMeter("h-mem-meter", mem.percent);
+    } else {
+      document.getElementById("h-mem").textContent = "—";
+      setMeter("h-mem-meter", null);
+    }
+
+    if (mem.swap_total_bytes > 0) {
+      document.getElementById("h-swap").textContent =
+        fmtBytes(mem.swap_used_bytes) +
+        " / " +
+        fmtBytes(mem.swap_total_bytes) +
+        " (" +
+        Number(mem.swap_percent).toFixed(1) +
+        "%)";
+      setMeter("h-swap-meter", mem.swap_percent);
+    } else {
+      document.getElementById("h-swap").textContent = "none";
+      setMeter("h-swap-meter", null);
+    }
+
+    if (disk && disk.total_bytes) {
+      document.getElementById("h-disk").textContent =
+        fmtBytes(disk.used_bytes) +
+        " / " +
+        fmtBytes(disk.total_bytes) +
+        " (" +
+        Number(disk.percent).toFixed(1) +
+        "%)";
+      setMeter("h-disk-meter", disk.percent);
+    } else {
+      document.getElementById("h-disk").textContent = "—";
+      setMeter("h-disk-meter", null);
+    }
+
+    document.getElementById("h-uptime").textContent = fmtUptime(host.uptime_seconds);
+
+    var hostBits = [];
+    if (host.hostname) hostBits.push(host.hostname);
+    hostBits.push("live snapshot");
+    meta.textContent = hostBits.join(" · ");
+
+    var gpus = host.gpu || [];
+    if (!gpus.length) {
+      gpuEl.hidden = true;
+      gpuEl.innerHTML = "";
+      return;
+    }
+    gpuEl.hidden = false;
+    gpuEl.innerHTML =
+      '<h3 class="muted" style="margin:12px 0 8px;font-size:11px;text-transform:uppercase">GPU</h3>' +
+      '<div class="grid-stats">' +
+      gpus
+        .map(function (g, i) {
+          var util = g.utilization_percent;
+          var utilLabel =
+            util == null || util === "" ? "—" : Number(util).toFixed(0) + "%";
+          var memLabel = "—";
+          if (g.memory_total_bytes) {
+            memLabel =
+              fmtBytes(g.memory_used_bytes || 0) +
+              " / " +
+              fmtBytes(g.memory_total_bytes);
+          }
+          var temp =
+            g.temperature_c == null || g.temperature_c === ""
+              ? ""
+              : Number(g.temperature_c).toFixed(0) + "°C";
+          var title = api.esc(
+            (g.name || "GPU " + (i + 1)) + (g.vendor ? " · " + g.vendor : "")
+          );
+          var meterId = "h-gpu-meter-" + i;
+          var meterHtml =
+            util == null || util === ""
+              ? ""
+              : '<div class="meter" id="' +
+                meterId +
+                '"><div class="meter-fill" style="width:' +
+                Math.max(0, Math.min(100, Number(util))).toFixed(1) +
+                '%"></div></div>';
+          return (
+            '<div class="stat"><div class="k">' +
+            title +
+            '</div><div class="v">' +
+            utilLabel +
+            (temp ? " · " + temp : "") +
+            '</div><div class="muted" style="font-size:12px;margin-top:4px">' +
+            api.esc(memLabel) +
+            "</div>" +
+            meterHtml +
+            "</div>"
+          );
+        })
+        .join("") +
+      "</div>";
+    gpus.forEach(function (g, i) {
+      if (g.utilization_percent == null || g.utilization_percent === "") return;
+      var el = document.getElementById("h-gpu-meter-" + i);
+      if (!el) return;
+      var p = Number(g.utilization_percent);
+      el.classList.toggle("warn", p >= 75 && p < 90);
+      el.classList.toggle("bad", p >= 90);
+    });
+  }
+
   function renderSpark(series, bucketSeconds) {
     var el = document.getElementById("chart-splices");
     var byBucket = {};
@@ -232,6 +422,7 @@
     document.getElementById("m-routes").textContent = n(t.routing_changes);
     document.getElementById("m-config").textContent = n(t.config_changes);
     document.getElementById("m-life").textContent = n(t.lifecycle_events);
+    renderHost(d.host);
     renderSpark(d.series, d.bucket_seconds);
     renderByChannel(d.by_channel);
     renderRoutes(d.channels && d.channels.routes);

@@ -172,8 +172,9 @@ Done:
 - `nexbreak-egress`: UDP local feed → SRT (ffmpeg)
 - `web/` UI: Dashboard, Roll (with live preview + CC overlay + policy cycle), Preview,
   Channels (processing + egress editors), Router, Captions, Verify, Services
-  (systemd/journal via allowlisted sudo wrappers — no controller), Metrics (audit-derived
-  splice/config/routing activity), Audit; `/api` PHP proxy to controller/verify
+  (systemd/journal via allowlisted sudo wrappers — no controller), Metrics (host
+  CPU/mem/disk/uptime/GPU + audit-derived splice/config/routing activity), Audit;
+  `/api` PHP proxy to controller/verify
 
 Next:
 - Hardware bring-up of channel 1 against a real RTSP source

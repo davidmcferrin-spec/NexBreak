@@ -155,7 +155,8 @@ changes need a unit restart.
 **Services** / **Metrics** mirror NexVUE ops: `install` drops allowlisted
 `/usr/local/bin/nexbreak-ops-*.sh` + `/etc/sudoers.d/nexbreak-ops` so the
 Services page can status/journal/restart channel units as `www-data`.
-Metrics charts splice/config/routing activity from `audit_events`.
+Metrics shows live host resources (CPU, load, memory, disk, uptime, GPU when
+present) plus splice/config/routing activity from `audit_events`.
 
 ### Troubleshooting: "controller unreachable" / API 500
 

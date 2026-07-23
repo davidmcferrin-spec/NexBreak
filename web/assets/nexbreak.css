@@ -184,6 +184,32 @@ body {
 .stat .v.ok { color: var(--ok); }
 .stat .v.warn { color: var(--warn); }
 
+.meter {
+  margin-top: 8px;
+  height: 4px;
+  background: var(--edge);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  width: 0;
+  background: var(--acc);
+  border-radius: 2px;
+  transition: width 0.35s ease;
+}
+
+.meter.warn .meter-fill { background: var(--warn); }
+.meter.bad .meter-fill { background: var(--bad); }
+
+.host-gpu { margin-top: 4px; }
+
+#host-stats .stat .v {
+  font-size: 16px;
+  word-break: break-word;
+}
+
 .bar {
   display: flex;
   flex-wrap: wrap;

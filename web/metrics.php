@@ -8,7 +8,7 @@ require __DIR__ . '/include/header.php';
 <div class="page-header">
   <div>
     <h1>Metrics</h1>
-    <p class="sub">Splice / config / routing activity from the audit log — not viewer analytics</p>
+    <p class="sub">Host resources plus splice / config / routing activity from the audit log</p>
   </div>
   <div class="bar">
     <span class="muted">range:</span>
@@ -21,6 +21,20 @@ require __DIR__ . '/include/header.php';
     <span id="state" class="muted"></span>
   </div>
 </div>
+
+<section class="panel" id="host-panel">
+  <h2>Host</h2>
+  <p class="muted" style="margin:0 0 10px;font-size:12px" id="host-meta">Loading…</p>
+  <div class="grid-stats" id="host-stats">
+    <div class="stat"><div class="k">CPU</div><div class="v" id="h-cpu">—</div><div class="meter" id="h-cpu-meter" hidden><div class="meter-fill"></div></div></div>
+    <div class="stat"><div class="k">Load (1 / 5 / 15)</div><div class="v" id="h-load">—</div></div>
+    <div class="stat"><div class="k">Memory</div><div class="v" id="h-mem">—</div><div class="meter" id="h-mem-meter" hidden><div class="meter-fill"></div></div></div>
+    <div class="stat"><div class="k">Swap</div><div class="v" id="h-swap">—</div><div class="meter" id="h-swap-meter" hidden><div class="meter-fill"></div></div></div>
+    <div class="stat"><div class="k">Disk (/)</div><div class="v" id="h-disk">—</div><div class="meter" id="h-disk-meter" hidden><div class="meter-fill"></div></div></div>
+    <div class="stat"><div class="k">Uptime</div><div class="v" id="h-uptime">—</div></div>
+  </div>
+  <div id="host-gpu" class="host-gpu" hidden></div>
+</section>
 
 <section class="grid-stats" id="totals">
   <div class="stat"><div class="k">Splices</div><div class="v" id="m-splices">—</div></div>

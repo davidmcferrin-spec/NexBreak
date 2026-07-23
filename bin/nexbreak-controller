@@ -37,6 +37,7 @@ from nexbreak_db import (  # noqa: E402
 )
 from nexbreak_pipeline import enrich_channel_bitrate  # noqa: E402
 from nexbreak_control import send_caption_set, send_caption_status, send_splice  # noqa: E402
+from nexbreak_host import host_snapshot  # noqa: E402
 
 
 log = logging.getLogger("nexbreak-controller")
@@ -313,6 +314,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True, "service": "nexbreak-controller"})
             return
 
+        if path == "/v1/host":
+            # Live host resources (CPU/mem/disk/GPU/uptime) — no DB needed.
+            self._send(200, {"ok": True, "host": host_snapshot()})
+            return
+
         conn = db()
         try:
             if path == "/v1/processing":
@@ -412,7 +418,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/v1/metrics":
-                # Operational metrics from audit_events (not viewer analytics).
+                # Operational metrics from audit_events + live host snapshot.
                 range_key = (qs.get("range") or ["24h"])[0]
                 ranges = {
                     "15m": (15 * 60, 60),
@@ -467,7 +473,7 @@ class Handler(BaseHTTPRequestHandler):
                       SUM(CASE WHEN event_type = 'splice_command' AND result = 'failure' THEN 1 ELSE 0 END) AS splice_fail,
                       SUM(CASE WHEN event_type = 'routing_change' THEN 1 ELSE 0 END) AS routing_changes,
                       SUM(CASE WHEN event_type = 'config_change' THEN 1 ELSE 0 END) AS config_changes,
-                      SUM(CASE WHEN event_type = 'service_lifecycle' THEN 1 ELSE 0 END) AS lifecycle_events
+                      SUM(CASE WHEN event_type IN ('service_start','service_stop','service_crash') THEN 1 ELSE 0 END) AS lifecycle_events
                     FROM audit_events
                     WHERE occurred_at >= datetime('now', ?)
                     """,
@@ -504,6 +510,7 @@ class Handler(BaseHTTPRequestHandler):
                             "egress": rows_to_dicts(egr),
                             "routes": rows_to_dicts(routes),
                         },
+                        "host": host_snapshot(),
                     },
                 )
                 return
