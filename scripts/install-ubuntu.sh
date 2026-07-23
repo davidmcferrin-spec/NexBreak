@@ -16,7 +16,7 @@ Usage: sudo $0 <command>
   all           Full bring-up / refresh: deps + install + missing vosk/cc-injector + DB
                 (safe to re-run; skips optional pieces that are already present)
   init-db       Create SQLite schema + seed 4 demo channels
-  enable        Enable controller + proc@1 + egress@1
+  enable        Enable controller + verify + proc@1 + egress@1
   restart       Restart every active nexbreak-* unit (after code deploy)
   vosk          Download Vosk model + pip package; wire NEXBREAK_VOSK_MODEL
   cc-injector   Build/install Live Caption Encoder (cc_injector) for CEA-608
@@ -35,12 +35,19 @@ restart_nexbreak_units() {
   systemctl daemon-reload
   local unit
   local restarted=0
-  for unit in nexbreak-controller nexbreak-mediamtx; do
+  for unit in nexbreak-controller nexbreak-verify nexbreak-mediamtx; do
+    if ! systemctl cat "$unit" >/dev/null 2>&1; then
+      continue
+    fi
+    systemctl enable "$unit" 2>/dev/null || true
     if systemctl is-active --quiet "$unit" 2>/dev/null; then
       echo "Restarting ${unit}…"
       systemctl restart "$unit"
-      restarted=1
+    else
+      echo "Starting ${unit}…"
+      systemctl start "$unit" || true
     fi
+    restarted=1
   done
   # list-units --state=running; also catch activating templates.
   while IFS= read -r unit; do
@@ -55,12 +62,18 @@ restart_nexbreak_units() {
   if [[ "$restarted" -eq 0 ]]; then
     echo "No active NexBreak units to restart (run: $0 enable)"
   else
-    # Give controller a moment, then confirm verify routes are live.
     sleep 1
-    if curl -fsS http://127.0.0.1:8787/v1/verify/egresses >/dev/null 2>&1; then
-      echo "Controller OK — /v1/verify/egresses reachable"
-    elif curl -fsS http://127.0.0.1:8787/v1/health >/dev/null 2>&1; then
-      echo "WARN: controller up but /v1/verify/egresses failed — check journalctl -u nexbreak-controller" >&2
+    if curl -fsS http://127.0.0.1:8787/v1/health >/dev/null 2>&1; then
+      echo "Controller OK — /v1/health reachable"
+    else
+      echo "WARN: controller health check failed — journalctl -u nexbreak-controller" >&2
+    fi
+    if curl -fsS http://127.0.0.1:8788/v1/verify/egresses >/dev/null 2>&1; then
+      echo "Verify OK — /v1/verify/egresses reachable on :8788"
+    elif curl -fsS http://127.0.0.1:8788/v1/health >/dev/null 2>&1; then
+      echo "WARN: nexbreak-verify up but /v1/verify/egresses failed" >&2
+    else
+      echo "WARN: nexbreak-verify not reachable — journalctl -u nexbreak-verify" >&2
     fi
   fi
 }
@@ -161,7 +174,7 @@ cmd_install() {
   usermod -aG nexbreak www-data || true
   chmod 0755 "$PREFIX"/bin/nexbreak-*
   # Substitute PREFIX/DATA into unit files (templates ship with /opt and /var/lib defaults)
-  for unit in nexbreak-controller.service nexbreak-proc@.service nexbreak-egress@.service nexbreak-mediamtx.service; do
+  for unit in nexbreak-controller.service nexbreak-verify.service nexbreak-proc@.service nexbreak-egress@.service nexbreak-mediamtx.service; do
     sed -e "s|/opt/nexbreak|${PREFIX}|g" \
         -e "s|/var/lib/nexbreak|${DATA}|g" \
         "$PREFIX/systemd/$unit" > "/etc/systemd/system/$unit"
@@ -239,8 +252,8 @@ cmd_all() {
     echo "=== DB present: $DATA/nexbreak.sqlite ==="
   fi
   # Ensure core units are enabled; start if not already running.
-  systemctl enable nexbreak-mediamtx nexbreak-controller 2>/dev/null || true
-  systemctl start nexbreak-mediamtx nexbreak-controller 2>/dev/null || true
+  systemctl enable nexbreak-mediamtx nexbreak-controller nexbreak-verify 2>/dev/null || true
+  systemctl start nexbreak-mediamtx nexbreak-controller nexbreak-verify 2>/dev/null || true
   echo "=== status ==="
   cmd_status
   echo
@@ -261,15 +274,17 @@ cmd_init_db() {
 cmd_enable() {
   systemctl enable --now nexbreak-mediamtx
   systemctl enable --now nexbreak-controller
+  systemctl enable --now nexbreak-verify
   systemctl enable --now nexbreak-proc@1
   systemctl enable --now nexbreak-egress@1
-  systemctl status --no-pager nexbreak-mediamtx nexbreak-controller 'nexbreak-proc@1' 'nexbreak-egress@1' || true
+  systemctl status --no-pager nexbreak-mediamtx nexbreak-controller nexbreak-verify 'nexbreak-proc@1' 'nexbreak-egress@1' || true
 }
 
 cmd_status() {
-  systemctl status --no-pager nexbreak-mediamtx nexbreak-controller 'nexbreak-proc@*' 'nexbreak-egress@*' || true
+  systemctl status --no-pager nexbreak-mediamtx nexbreak-controller nexbreak-verify 'nexbreak-proc@*' 'nexbreak-egress@*' || true
   echo "---"
   curl -sS http://127.0.0.1:8787/v1/health || echo "controller not reachable"
+  curl -sS http://127.0.0.1:8788/v1/health || echo "verify not reachable"
   curl -sS http://127.0.0.1:9997/v3/paths/list || echo "mediamtx API not reachable"
 }
 

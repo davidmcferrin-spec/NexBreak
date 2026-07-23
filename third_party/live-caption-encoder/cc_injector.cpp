@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cstdlib>
+#include <cstdint>
 
 // POSIX UDP socket (non-blocking)
 #include <sys/types.h>
@@ -163,8 +165,9 @@ static inline void trim_inplace(std::string& s) {
     ltrim_inplace(s); rtrim_inplace(s);
 }
 
-// Drain UDP and return the last non-empty line (sanitized, <=32 chars). Logs each final line.
-static bool udp_get_latest_line_and_log(int fd, std::string& out_line) {
+// Drain UDP and return the last *new* non-empty line (sanitized, <=32 chars).
+// Identical consecutive lines are ignored (avoids dual-feed / Vosk repeat spam).
+static bool udp_get_latest_line_and_log(int fd, std::string& out_line, std::string& last_seen) {
     if (fd < 0) return false;
     bool got = false;
     char buf[2048];
@@ -201,11 +204,12 @@ static bool udp_get_latest_line_and_log(int fd, std::string& out_line) {
             if (t.size() >= 32) break;
         }
         trim_inplace(t);
-        if (!t.empty()) {
-            out_line = t;
-            got = true;
-            std::cerr << "[cc] recv: \"" << out_line << "\"\n";
-        }
+        if (t.empty()) continue;
+        if (t == last_seen) continue; // drop duplicate
+        last_seen = t;
+        out_line = t;
+        got = true;
+        std::cerr << "[cc] recv: \"" << out_line << "\"\n";
     }
     return got;
 }
@@ -247,6 +251,39 @@ static bool parse_int_arg(const char* s, const char* key, int& val) {
     return true;
 }
 
+/** Parse --bitrate=14000k | 14M | 14000000 → bits/sec. */
+static bool parse_bitrate_arg(const char* s, const char* key, int64_t& bps) {
+    if (!s) return false;
+    const size_t klen = std::strlen(key);
+    if (std::strncmp(s, key, klen) != 0) return false;
+    const char* eq = s + klen;
+    if (*eq != '=') return false;
+    const char* p = eq + 1;
+    if (!*p) return false;
+    char* end = nullptr;
+    double v = std::strtod(p, &end);
+    if (end == p || v <= 0) return false;
+    while (end && *end && std::isspace(static_cast<unsigned char>(*end))) ++end;
+    if (end && (*end == 'k' || *end == 'K')) {
+        bps = static_cast<int64_t>(v * 1000.0);
+    } else if (end && (*end == 'm' || *end == 'M')) {
+        bps = static_cast<int64_t>(v * 1000000.0);
+    } else {
+        // Bare number: treat values < 1e6 as kbps (ops convenience), else bps.
+        bps = (v < 1000000.0) ? static_cast<int64_t>(v * 1000.0)
+                              : static_cast<int64_t>(v);
+    }
+    return bps > 0;
+}
+
+static int64_t parse_bitrate_string(const char* s) {
+    if (!s || !*s) return 0;
+    std::string fake = std::string("--bitrate=") + s;
+    int64_t bps = 0;
+    if (!parse_bitrate_arg(fake.c_str(), "--bitrate", bps)) return 0;
+    return bps;
+}
+
 // ======================================================================================
 // Audio layout helpers (FFmpeg version-guarded)
 // ======================================================================================
@@ -286,7 +323,8 @@ int main(int argc, char** argv)
     // Defaults: prefer libx264 (SEI/GA94 path), bootstrap on, linger 750ms
     std::string venc_name = "libx264";
     int bootstrap_enable = 1;
-    int linger_ms = 750;
+    int linger_ms = 750; // retained for CLI compat; inject is event-driven (no per-frame linger)
+    int64_t bitrate_hint_bps = 0; // 0 = derive from input
 
     for (int i = 1; i < argc; ++i) {
         if (std::strncmp(argv[i], "--cc-udp=", 9) == 0) {
@@ -297,11 +335,17 @@ int main(int argc, char** argv)
             use_external_udp_captions = true;
         } else if (std::strncmp(argv[i], "--venc=", 7) == 0) {
             parse_venc_arg(argv[i], venc_name);
+        } else if (parse_bitrate_arg(argv[i], "--bitrate", bitrate_hint_bps)) {
+            // parsed
         } else if (parse_int_arg(argv[i], "--bootstrap", bootstrap_enable)) {
             // parsed
         } else if (parse_int_arg(argv[i], "--linger_ms", linger_ms)) {
-            // parsed
+            (void)linger_ms;
         }
+    }
+    if (bitrate_hint_bps <= 0) {
+        const char* env_br = std::getenv("NEXBREAK_CC_INJECT_VBITRATE");
+        bitrate_hint_bps = parse_bitrate_string(env_br);
     }
 
     // Open input
@@ -353,8 +397,36 @@ int main(int argc, char** argv)
     vencCtx->gop_size  = 30;
     vencCtx->max_b_frames = 0;
 
+    // Bitrate: never go below input; add ~5% headroom for A/53 SEI.
+    int64_t in_vbr = ifmt->streams[vIdx]->codecpar->bit_rate;
+    if (in_vbr <= 0 && ifmt->bit_rate > 0) {
+        // Container bitrate minus a rough audio allowance when stream bit_rate missing.
+        in_vbr = ifmt->bit_rate;
+        if (aIdx >= 0) {
+            int64_t abr = ifmt->streams[aIdx]->codecpar->bit_rate;
+            if (abr > 0 && abr < in_vbr) in_vbr -= abr;
+        }
+    }
+    int64_t base_vbr = std::max(bitrate_hint_bps, in_vbr);
+    if (base_vbr <= 0) base_vbr = 14000000; // 14 Mbps fallback
+    // Hint from NexBreak already includes +10 kbps caption headroom; do not also *1.05.
+    int64_t out_vbr = base_vbr;
+    if (bitrate_hint_bps <= 0 && in_vbr > 0) {
+        out_vbr = in_vbr + 10000; // +10 kbps when no channel hint
+    }
+    vencCtx->bit_rate = out_vbr;
+    vencCtx->rc_max_rate = out_vbr;
+    vencCtx->rc_buffer_size = static_cast<int>(std::min<int64_t>(out_vbr, 2147483647));
+    std::cerr << "[venc] bitrate in=" << in_vbr
+              << " hint=" << bitrate_hint_bps
+              << " out=" << out_vbr << "\n";
+
     // Encourage A/53 captions in libx26x wrappers (no-op if option absent)
-    av_opt_set(vencCtx->priv_data, "a53cc", "1", 0);
+    if (vencCtx->priv_data) {
+        av_opt_set(vencCtx->priv_data, "a53cc", "1", 0);
+        av_opt_set(vencCtx->priv_data, "preset", "veryfast", 0);
+        av_opt_set(vencCtx->priv_data, "tune", "zerolatency", 0);
+    }
 
     if (avcodec_open2(vencCtx, venc, nullptr) < 0) { std::cerr << "open venc failed\n"; return 1; }
 
@@ -368,47 +440,20 @@ int main(int argc, char** argv)
     if (avcodec_parameters_from_context(vout->codecpar, vencCtx) < 0) { std::cerr << "copy v params failed\n"; return 1; }
     vout->time_base = vencCtx->time_base;
 
-    // Optional audio: decode -> encode AAC -> mux
-    AVCodecContext* adecCtx = nullptr;
-    AVCodecContext* aencCtx = nullptr;
-    AVStream*       aout    = nullptr;
-
+    // Audio: bitstream copy (do NOT re-encode — AAC re-encode was breaking A/V PTS
+    // and causing audible stutter on the SRT egress).
+    AVStream* aout = nullptr;
+    bool audio_copy = false;
     if (aIdx >= 0) {
-        const AVCodec* adec = avcodec_find_decoder(ifmt->streams[aIdx]->codecpar->codec_id);
-        if (adec) {
-            adecCtx = avcodec_alloc_context3(adec);
-            avcodec_parameters_to_context(adecCtx, ifmt->streams[aIdx]->codecpar);
-            if (avcodec_open2(adecCtx, adec, nullptr) < 0) { avcodec_free_context(&adecCtx); adecCtx = nullptr; }
-        }
-
-        const AVCodec* aenc = avcodec_find_encoder(AV_CODEC_ID_AAC);
-        if (adecCtx && aenc) {
-            aencCtx = avcodec_alloc_context3(aenc);
-
-#if LIBAVCODEC_VERSION_MAJOR >= 59
-            if (adecCtx->sample_rate > 0) aencCtx->sample_rate = adecCtx->sample_rate; else aencCtx->sample_rate = 48000;
-            aencCtx->time_base = AVRational{1, aencCtx->sample_rate};
-            if (aenc->sample_fmts) aencCtx->sample_fmt = aenc->sample_fmts[0]; else aencCtx->sample_fmt = AV_SAMPLE_FMT_FLTP;
-            set_audio_layout_from_decoder(aencCtx, adecCtx);
-#else
-            aencCtx->channels       = adecCtx->channels ? adecCtx->channels : 2;
-            aencCtx->channel_layout = adecCtx->channel_layout ? adecCtx->channel_layout : AV_CH_LAYOUT_STEREO;
-            aencCtx->sample_rate    = adecCtx->sample_rate ? adecCtx->sample_rate : 48000;
-            aencCtx->sample_fmt     = aenc->sample_fmts ? aenc->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
-            aencCtx->time_base      = AVRational{1, aencCtx->sample_rate};
-#endif
-
-            if (avcodec_open2(aencCtx, aenc, nullptr) == 0) {
-                aout = avformat_new_stream(ofmt, aenc);
-                if (!aout || avcodec_parameters_from_context(aout->codecpar, aencCtx) < 0) {
-                    if (aout) aout->codecpar = nullptr;
-                    avcodec_free_context(&aencCtx); aencCtx = nullptr;
-                } else {
-                    aout->time_base = aencCtx->time_base;
-                }
-            } else {
-                avcodec_free_context(&aencCtx); aencCtx = nullptr;
-            }
+        aout = avformat_new_stream(ofmt, nullptr);
+        if (aout && avcodec_parameters_copy(aout->codecpar, ifmt->streams[aIdx]->codecpar) >= 0) {
+            aout->time_base = ifmt->streams[aIdx]->time_base;
+            aout->codecpar->codec_tag = 0;
+            audio_copy = true;
+            std::cerr << "[aenc] bitstream copy (preserve A/V sync)\n";
+        } else {
+            std::cerr << "[aenc] audio copy failed — video-only output\n";
+            aout = nullptr;
         }
     }
 
@@ -420,26 +465,19 @@ int main(int argc, char** argv)
     AVPacket* ipkt = av_packet_alloc();
     AVPacket* opkt = av_packet_alloc();
     AVFrame*  vfrm = av_frame_alloc();
-    AVFrame*  afrm = av_frame_alloc();
 
     // Caption state
     const bool USE_ROLLUP = true;
     RollUp2State ru2{};
     bool caption_pending = false;
     std::string current_caption;
+    std::string prev_caption;
+    std::string curr_caption;
+    std::string last_udp_line;
 
-    // NEW: track last two distinct captions to avoid duplicate lines in RU2
-    std::string prev_caption;  // top line (previous)
-    std::string curr_caption;  // bottom line (current)
-
-    // Linger last caption so player can latch on
-    std::string last_caption;
-    int64_t last_caption_expire_pts = AV_NOPTS_VALUE;
-
-    // Bootstrap caption (helps players expose CC track immediately)
+    // Bootstrap once (helps players expose CC track)
     bool bootstrap_pending = (bootstrap_enable != 0);
     std::string bootstrap_caption = "CC ONLINE";
-    int64_t bootstrap_expire_pts = AV_NOPTS_VALUE;
 
     // External UDP listener
     CaptionInput caprx{};
@@ -454,108 +492,73 @@ int main(int argc, char** argv)
         if (ipkt->stream_index == vIdx) {
             if (avcodec_send_packet(vdecCtx, ipkt) == 0) {
                 while (avcodec_receive_frame(vdecCtx, vfrm) == 0) {
-                    // Rescale PTS to encoder tb
                     AVRational src = ifmt->streams[vIdx]->time_base;
                     AVRational dst = vencCtx->time_base;
                     if (vfrm->pts != AV_NOPTS_VALUE)
                         vfrm->pts = av_rescale_q(vfrm->pts, src, dst);
 
-                    // Poll UDP (non-blocking) and log
+                    // Poll UDP (non-blocking); duplicates dropped inside helper
                     if (use_external_udp_captions && caprx.enabled) {
                         std::string latest;
-                        if (udp_get_latest_line_and_log(caprx.fd, latest)) {
+                        if (udp_get_latest_line_and_log(caprx.fd, latest, last_udp_line)) {
                             if (!latest.empty()) {
                                 current_caption = latest;
                                 caption_pending = true;
-
-                                // (Re)set linger
-                                int64_t linger = (int64_t)((linger_ms / 1000.0) * (vencCtx->time_base.den / (double)vencCtx->time_base.num));
-                                last_caption = current_caption;
-                                last_caption_expire_pts = (vfrm->pts == AV_NOPTS_VALUE) ? linger : vfrm->pts + linger;
                             }
                         }
                     }
 
-                    // Bootstrap immediately at start (for ~1s)
+                    // Bootstrap once at first frame
                     if (bootstrap_pending) {
-                        int64_t linger = (int64_t)(1.0 * vencCtx->time_base.den / (double)vencCtx->time_base.num);
-                        bootstrap_expire_pts = (vfrm->pts == AV_NOPTS_VALUE) ? linger : vfrm->pts + linger;
                         bootstrap_pending = false;
-
-                        last_caption = bootstrap_caption;
-                        last_caption_expire_pts = bootstrap_expire_pts;
                         current_caption = bootstrap_caption;
-                        caption_pending = true; // force immediate injection
-                    } else if (bootstrap_enable &&
-                               vfrm->pts != AV_NOPTS_VALUE &&
-                               vfrm->pts < bootstrap_expire_pts &&
-                               !caption_pending) {
-                        current_caption = bootstrap_caption;
-                        caption_pending = true; // keep bootstrap alive during window
+                        caption_pending = true;
                     }
 
-                    // Remove any previous A/53 on this frame
                     av_frame_remove_side_data(vfrm, AV_FRAME_DATA_A53_CC);
 
-                    // -------------------- Build CC buffer with "distinct-roll" logic --------------------
                     std::vector<uint8_t> cc;
-                    bool do_inject      = false;
-                    bool do_repaint     = false;  // repaint bottom w/o CR
-                    bool do_roll        = false;  // roll (CR), then paint bottom
+                    bool do_inject = false;
+                    bool do_repaint = false;
+                    bool do_roll = false;
 
-                    // NEW UDP/bootstrap line just arrived
+                    // Inject ONLY when a new caption event arrives — never every frame.
+                    // (Per-frame linger repaints burned CPU and flooded the bitstream.)
                     if (caption_pending && !current_caption.empty()) {
-                        caption_pending = false; // consume the event
+                        caption_pending = false;
 
-                        // First-time bootstrap: if nothing on screen yet, paint bottom only
                         if (!ru2.started && curr_caption.empty()) {
                             curr_caption = current_caption;
-                            do_repaint   = true;   // RU2 (once) + PAC + text
-                            do_inject    = true;
-                        } else {
-                            // Only roll when the new line is DISTINCT from the current bottom line
-                            if (current_caption != curr_caption) {
-                                prev_caption = curr_caption;     // becomes top after CR
-                                curr_caption = current_caption;  // becomes bottom after CR
-                                do_roll   = true;                // send CR + new text
-                                do_inject = true;
-                            } else {
-                                // Same text as bottom: repaint only (avoid duplicates on both rows)
-                                do_repaint = true;
-                                do_inject  = true;
-                            }
+                            do_repaint = true;
+                            do_inject = true;
+                        } else if (current_caption != curr_caption) {
+                            prev_caption = curr_caption;
+                            curr_caption = current_caption;
+                            do_roll = true;
+                            do_inject = true;
                         }
-                    }
-                    // Linger window: repaint only (no CR)
-                    else if (!curr_caption.empty() &&
-                             vfrm->pts != AV_NOPTS_VALUE &&
-                             vfrm->pts < last_caption_expire_pts) {
-                        current_caption = curr_caption; // reaffirm bottom text
-                        do_repaint  = true;
-                        do_inject   = true;
+                        // Identical to current bottom line: no re-inject
                     }
 
                     if (do_inject) {
                         if (USE_ROLLUP) {
-                            if (do_roll)      build_ru2_update_cc(cc, ru2, current_caption);     // includes CR
+                            if (do_roll)      build_ru2_update_cc(cc, ru2, current_caption);
                             else              build_ru2_repaint_no_roll(cc, ru2, current_caption);
                         } else {
                             build_popon_cc(cc, current_caption);
                         }
                     }
 
-                    // Attach CC side-data (and log)
                     if (!cc.empty()) {
                         AVFrameSideData* sd = av_frame_new_side_data(vfrm, AV_FRAME_DATA_A53_CC, cc.size());
                         if (sd) {
                             std::memcpy(sd->data, cc.data(), cc.size());
                             std::cerr << "[cc] inject len=" << cc.size()
-                                      << (do_roll ? " (roll)" : " (repaint)")
+                                      << (do_roll ? " (roll)" : " (paint)")
                                       << " pts=" << vfrm->pts << "\n";
                         }
                     }
 
-                    // Encode -> mux
                     if (avcodec_send_frame(vencCtx, vfrm) < 0) break;
                     while (avcodec_receive_packet(vencCtx, opkt) == 0) {
                         av_packet_rescale_ts(opkt, vencCtx->time_base, vout->time_base);
@@ -566,18 +569,13 @@ int main(int argc, char** argv)
                     av_frame_unref(vfrm);
                 }
             }
-        } else if (aIdx >= 0 && ipkt->stream_index == aIdx && adecCtx && aencCtx && aout) {
-            if (avcodec_send_packet(adecCtx, ipkt) == 0) {
-                while (avcodec_receive_frame(adecCtx, afrm) == 0) {
-                    if (avcodec_send_frame(aencCtx, afrm) < 0) break;
-                    while (avcodec_receive_packet(aencCtx, opkt) == 0) {
-                        av_packet_rescale_ts(opkt, aencCtx->time_base, aout->time_base);
-                        opkt->stream_index = aout->index;
-                        av_interleaved_write_frame(ofmt, opkt);
-                        av_packet_unref(opkt);
-                    }
-                    av_frame_unref(afrm);
-                }
+        } else if (audio_copy && aIdx >= 0 && ipkt->stream_index == aIdx && aout) {
+            AVPacket* ap = av_packet_clone(ipkt);
+            if (ap) {
+                ap->stream_index = aout->index;
+                av_packet_rescale_ts(ap, ifmt->streams[aIdx]->time_base, aout->time_base);
+                av_interleaved_write_frame(ofmt, ap);
+                av_packet_free(&ap);
             }
         }
         av_packet_unref(ipkt);
@@ -591,31 +589,18 @@ int main(int argc, char** argv)
         av_interleaved_write_frame(ofmt, opkt);
         av_packet_unref(opkt);
     }
-    // Flush audio
-    if (aencCtx && aout) {
-        avcodec_send_frame(aencCtx, nullptr);
-        while (avcodec_receive_packet(aencCtx, opkt) == 0) {
-            av_packet_rescale_ts(opkt, aencCtx->time_base, aout->time_base);
-            opkt->stream_index = aout->index;
-            av_interleaved_write_frame(ofmt, opkt);
-            av_packet_unref(opkt);
-        }
-    }
 
     av_write_trailer(ofmt);
 
     // cleanup
-    av_frame_free(&vfrm); av_frame_free(&afrm);
+    av_frame_free(&vfrm);
     av_packet_free(&ipkt); av_packet_free(&opkt);
-    if (adecCtx) avcodec_free_context(&adecCtx);
-    if (aencCtx) avcodec_free_context(&aencCtx);
     avcodec_free_context(&vdecCtx);
     avcodec_free_context(&vencCtx);
     if (!(ofmt->oformat->flags & AVFMT_NOFILE)) avio_closep(&ofmt->pb);
     avformat_free_context(ofmt);
     avformat_close_input(&ifmt);
 
-    // close UDP
     if (caprx.fd >= 0) close(caprx.fd);
 
     std::cout << "Done: " << outUrl << "\n";

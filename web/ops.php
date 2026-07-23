@@ -35,7 +35,7 @@ function read_json_body(): array
 function unit_allowed(string $unit): bool
 {
     return (bool) preg_match(
-        '/^(nexbreak-controller|nexbreak-mediamtx|nexbreak-proc@[0-9]|nexbreak-egress@[0-9])$/',
+        '/^(nexbreak-controller|nexbreak-verify|nexbreak-mediamtx|nexbreak-proc@[0-9]|nexbreak-egress@[0-9])$/',
         $unit
     );
 }
@@ -88,7 +88,7 @@ function sudo_run(array $argv, ?string $stdin = null): array
 /** Fixed ops inventory — no controller round-trip (keeps Services snappy). */
 function list_ops_units(): array
 {
-    $units = ['nexbreak-controller', 'nexbreak-mediamtx'];
+    $units = ['nexbreak-controller', 'nexbreak-verify', 'nexbreak-mediamtx'];
     for ($i = 1; $i <= 4; $i++) {
         $units[] = "nexbreak-proc@{$i}";
         $units[] = "nexbreak-egress@{$i}";
@@ -96,61 +96,13 @@ function list_ops_units(): array
     return $units;
 }
 
-function controller_get(string $path): ?array
-{
-    $url = 'http://127.0.0.1:8787' . $path;
-    if (function_exists('curl_init')) {
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_CONNECTTIMEOUT => 1,
-            CURLOPT_TIMEOUT => 2,
-            CURLOPT_HTTPHEADER => ['Accept: application/json'],
-        ]);
-        $raw = curl_exec($ch);
-        $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-        if ($raw === false || $code < 200 || $code >= 300) {
-            return null;
-        }
-    } else {
-        $ctx = stream_context_create(['http' => ['timeout' => 2, 'ignore_errors' => true]]);
-        $raw = @file_get_contents($url, false, $ctx);
-        if ($raw === false) {
-            return null;
-        }
-    }
-    $data = json_decode($raw, true);
-    return is_array($data) ? $data : null;
-}
-
-/** Channel template instances from controller DB (for restart_channels only). */
+/** Channel template instances for restart_channels — fixed @1–@4, no controller. */
 function list_channel_units(): array
 {
     $units = [];
-    $proc = controller_get('/v1/processing');
-    $egr = controller_get('/v1/egress');
-    if (is_array($proc) && !empty($proc['channels'])) {
-        foreach ($proc['channels'] as $ch) {
-            $sn = (string) ($ch['service_name'] ?? '');
-            if ($sn !== '' && preg_match('/^[0-9]$/', $sn)) {
-                $units[] = "nexbreak-proc@{$sn}";
-            }
-        }
-    }
-    if (is_array($egr) && !empty($egr['channels'])) {
-        foreach ($egr['channels'] as $ch) {
-            $sn = (string) ($ch['service_name'] ?? '');
-            if ($sn !== '' && preg_match('/^[0-9]$/', $sn)) {
-                $units[] = "nexbreak-egress@{$sn}";
-            }
-        }
-    }
-    if ($units === []) {
-        for ($i = 1; $i <= 4; $i++) {
-            $units[] = "nexbreak-proc@{$i}";
-            $units[] = "nexbreak-egress@{$i}";
-        }
+    for ($i = 1; $i <= 4; $i++) {
+        $units[] = "nexbreak-proc@{$i}";
+        $units[] = "nexbreak-egress@{$i}";
     }
     return $units;
 }

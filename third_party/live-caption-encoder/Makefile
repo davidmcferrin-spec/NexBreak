@@ -6,6 +6,10 @@
 # Build (Ubuntu 24.04):
 #   make && sudo make install
 # Or: sudo bash scripts/install-ubuntu.sh cc-injector
+#
+# After changing cc_injector.cpp, rebuild with:
+#   sudo bash scripts/install-ubuntu.sh cc-injector
+#   sudo systemctl restart 'nexbreak-proc@*'
 
 CXX ?= g++
 PKG_CFLAGS := $(shell pkg-config --cflags libavformat libavcodec libavutil libswresample)

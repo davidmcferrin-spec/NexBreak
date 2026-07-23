@@ -51,10 +51,13 @@ from nexbreak_pipeline import (  # noqa: E402
     ffmpeg_ingest_argv,
     ffmpeg_preview_argv,
     hex_to_bytes,
+    output_bitrate_kbps,
+    probe_mpegts_bitrate_kbps,
     require_bins,
     resolve_local_feed_host,
     scte35_xml,
     tsp_splice_argv,
+    write_bitrate_state,
 )
 
 log = logging.getLogger("nexbreak-proc")
@@ -77,12 +80,27 @@ _source_has_cc = False
 _effective_mode = "off"
 _pipeline_restart = False
 _next_probe_at = 0.0
+_next_bitrate_at = 0.0
+_sensed_bitrate_kbps: Optional[int] = None
 
 
 def _handle_signal(signum, _frame):
     global _stop
     log.info("signal %s — shutting down", signum)
     _stop = True
+    # Fast-path: SIGTERM children now so systemd stop isn't blocked on SRT/ffmpeg.
+    for p in list(reversed(_procs)):
+        if p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+    for side in (_preview, _cc_watch):
+        if side is not None and side.poll() is None:
+            try:
+                side.terminate()
+            except Exception:
+                pass
 
 
 def _policy() -> str:
@@ -112,19 +130,28 @@ def _stop_media(*, stop_captions: bool = False) -> None:
 
     for p in reversed(_procs):
         if p.poll() is None:
-            p.terminate()
+            try:
+                p.terminate()
+            except Exception:
+                pass
     for side in (_preview, _cc_watch):
         if side is not None and side.poll() is None:
-            side.terminate()
-    deadline = time.time() + 5
+            try:
+                side.terminate()
+            except Exception:
+                pass
+    deadline = time.time() + 1.5
     sides = [p for p in (_preview, _cc_watch) if p is not None]
     for p in list(reversed(_procs)) + sides:
         if p.poll() is None:
-            remaining = max(0.1, deadline - time.time())
+            remaining = max(0.05, deadline - time.time())
             try:
                 p.wait(timeout=remaining)
             except Exception:
-                p.kill()
+                try:
+                    p.kill()
+                except Exception:
+                    pass
     _procs.clear()
     _preview = None
     _preview_argv = []
@@ -319,6 +346,8 @@ def _start_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
             cue,
             "--cc-udp",
             cc_udp,
+            "--bitrate",
+            f"{int(channel.get('target_bitrate_kbps') or 14000)}k",
         ]
         log.info("cc-inject (LCE): %s", " ".join(inj_argv))
         inj = Popen(inj_argv, stdin=ff.stdout, stdout=PIPE, stderr=None)
@@ -355,6 +384,67 @@ def _restart_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
     _start_pipeline(channel, splice_udp)
 
 
+def _tick_bitrate_sense() -> None:
+    """Probe local feed bitrate; persist for UI and keep target_bitrate = sensed+10."""
+    global _sensed_bitrate_kbps, _next_bitrate_at, _channel
+    if not _channel:
+        return
+    now = time.time()
+    if now < _next_bitrate_at:
+        return
+    _next_bitrate_at = now + 15.0
+    host = _channel.get("local_feed_host") or "127.0.0.1"
+    port = int(_channel.get("local_feed_port") or 0)
+    if port <= 0:
+        return
+    sensed = probe_mpegts_bitrate_kbps(host, port, timeout=6.0)
+    if not sensed:
+        return
+    out = output_bitrate_kbps(sensed)
+    prev = _sensed_bitrate_kbps
+    _sensed_bitrate_kbps = sensed
+    write_bitrate_state(
+        str(_channel.get("service_name") or ""),
+        sensed_kbps=sensed,
+        output_kbps=out,
+    )
+    if prev != sensed:
+        log.info("sensed bitrate %s kbps → output target %s kbps (+10)", sensed, out)
+    # Persist so LCE/cc-inject and Channels UI share the same target.
+    if out and int(_channel.get("target_bitrate_kbps") or 0) != int(out):
+        _channel["target_bitrate_kbps"] = int(out)
+        if _db_path:
+            try:
+                conn = connect(_db_path)
+                try:
+                    migrate(conn)
+                    conn.execute(
+                        """
+                        UPDATE processing_channels
+                        SET target_bitrate_kbps = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (int(out), int(_channel["id"])),
+                    )
+                    # Keep egress target in sync for the routed outputs (display/CDN hint).
+                    conn.execute(
+                        """
+                        UPDATE egress_channels
+                        SET target_bitrate_kbps = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id IN (
+                          SELECT egress_channel_id FROM routing_assignments
+                          WHERE processing_channel_id = ?
+                        )
+                        """,
+                        (int(out), int(_channel["id"])),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("bitrate persist failed: %s", exc)
+
+
 def _watch_pipeline() -> Optional[int]:
     """Return exit code if a core child died; None if still healthy."""
     global _source_has_cc, _pipeline_restart, _next_probe_at
@@ -366,6 +456,7 @@ def _watch_pipeline() -> Optional[int]:
     _ensure_cc_watch()
     if _captions is not None:
         _captions.tick()
+    _tick_bitrate_sense()
 
     now = time.time()
     if now >= _next_probe_at and _channel:

@@ -465,3 +465,173 @@ def hex_to_bytes(hex_payload: str) -> bytes:
     if cleaned.lower().startswith("0x"):
         cleaned = cleaned[2:]
     return bytes.fromhex(cleaned)
+
+
+# --- Live bitrate sensing (Channels UI + LCE target) ---
+
+# Small bump so caption SEI / remux never under-runs the sensed program rate.
+BITRATE_HEADROOM_KBPS = 10
+
+
+def bitrate_run_dir() -> "Path":
+    from pathlib import Path
+
+    d = Path(os.environ.get("NEXBREAK_RUN_DIR", "/run/nexbreak")) / "bitrate"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
+def bitrate_state_path(service_name: str) -> "Path":
+    from pathlib import Path
+
+    return bitrate_run_dir() / f"{service_name}.json"
+
+
+def output_bitrate_kbps(sensed_kbps: Optional[int]) -> Optional[int]:
+    if sensed_kbps is None or sensed_kbps <= 0:
+        return None
+    return int(sensed_kbps) + BITRATE_HEADROOM_KBPS
+
+
+def write_bitrate_state(
+    service_name: str,
+    *,
+    sensed_kbps: Optional[int],
+    output_kbps: Optional[int] = None,
+) -> None:
+    import json
+    import time
+
+    out = output_kbps if output_kbps is not None else output_bitrate_kbps(sensed_kbps)
+    path = bitrate_state_path(service_name)
+    payload = {
+        "service_name": str(service_name),
+        "sensed_bitrate_kbps": sensed_kbps,
+        "output_bitrate_kbps": out,
+        "headroom_kbps": BITRATE_HEADROOM_KBPS,
+        "updated_at": time.time(),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def read_bitrate_state(service_name: str) -> Optional[dict[str, Any]]:
+    import json
+    from pathlib import Path
+
+    path = bitrate_state_path(service_name)
+    try:
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def probe_mpegts_bitrate_kbps(
+    feed_host: str,
+    feed_port: int,
+    *,
+    timeout: float = 8.0,
+) -> Optional[int]:
+    """
+    Sense program bitrate from the local MPEG-TS feed (post-ingest).
+    Uses ffprobe format/stream bit_rate; returns kbps or None.
+    """
+    import json
+    import subprocess
+
+    ffprobe = which("ffprobe")
+    if not ffprobe:
+        return None
+    url = udp_mpegts_input_url(feed_host, int(feed_port), fifo_size=500000)
+    argv = [
+        ffprobe,
+        "-v",
+        "error",
+        "-hide_banner",
+        "-analyzeduration",
+        "3000000",
+        "-probesize",
+        "2000000",
+        "-show_entries",
+        "format=bit_rate:stream=bit_rate,codec_type",
+        "-of",
+        "json",
+        url,
+    ]
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout.decode("utf-8", errors="replace") or "{}")
+    except json.JSONDecodeError:
+        return None
+
+    best = 0
+    for stream in data.get("streams") or []:
+        if stream.get("codec_type") != "video":
+            continue
+        try:
+            br = int(stream.get("bit_rate") or 0)
+        except (TypeError, ValueError):
+            br = 0
+        if br > best:
+            best = br
+    if best <= 0:
+        try:
+            best = int((data.get("format") or {}).get("bit_rate") or 0)
+        except (TypeError, ValueError):
+            best = 0
+    if best <= 0:
+        return None
+    return max(1, int(round(best / 1000.0)))
+
+
+def enrich_channel_bitrate(channel: dict[str, Any]) -> dict[str, Any]:
+    """Attach sensed/output bitrate fields from run-dir state (UI)."""
+    out = dict(channel)
+    st = read_bitrate_state(str(channel.get("service_name") or ""))
+    sensed = None
+    output = None
+    if st:
+        try:
+            sensed = int(st["sensed_bitrate_kbps"]) if st.get("sensed_bitrate_kbps") else None
+        except (TypeError, ValueError):
+            sensed = None
+        try:
+            output = int(st["output_bitrate_kbps"]) if st.get("output_bitrate_kbps") else None
+        except (TypeError, ValueError):
+            output = None
+    if sensed is None:
+        try:
+            tb = channel.get("target_bitrate_kbps")
+            if tb is not None:
+                # Legacy stored target ≈ output; back-calc sensed for display.
+                output = int(tb)
+                sensed = max(1, output - BITRATE_HEADROOM_KBPS)
+        except (TypeError, ValueError):
+            pass
+    if output is None and sensed is not None:
+        output = output_bitrate_kbps(sensed)
+    out["sensed_bitrate_kbps"] = sensed
+    out["output_bitrate_kbps"] = output
+    return out
+

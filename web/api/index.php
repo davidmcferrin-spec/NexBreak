@@ -1,8 +1,9 @@
 <?php
 /**
- * Same-origin API proxy → nexbreak-controller (127.0.0.1:8787).
+ * Same-origin API proxy → nexbreak-controller (:8787) or nexbreak-verify (:8788).
  *
- * Browser calls /api/v1/... ; this script forwards to the controller.
+ * Browser calls /api/v1/... ; this script forwards to the right loopback service.
+ * /v1/verify/* → nexbreak-verify; everything else → controller.
  * Prefer curl (works when allow_url_fopen is Off). Never leak a PHP 500 —
  * failures return JSON with 502.
  */
@@ -59,7 +60,11 @@ try {
     }
 
     $query = parse_url($uri, PHP_URL_QUERY);
-    $target = nexbreak_api_base() . $path . (is_string($query) && $query !== '' ? ('?' . $query) : '');
+    // Verify API is its own service — keep path shape stable for the UI.
+    $base = str_starts_with($path, '/v1/verify')
+        ? nexbreak_verify_api_base()
+        : nexbreak_api_base();
+    $target = $base . $path . (is_string($query) && $query !== '' ? ('?' . $query) : '');
 
     $body = null;
     $sendBody = in_array($method, ['POST', 'PUT', 'PATCH'], true);
@@ -132,7 +137,7 @@ function nexbreak_proxy_request(string $method, string $url, array $headers, ?st
 
         if ($raw === false || $errno !== 0) {
             return nexbreak_proxy_fail(
-                'controller unreachable via curl: ' . ($err !== '' ? $err : 'errno ' . $errno),
+                'backend unreachable via curl: ' . ($err !== '' ? $err : 'errno ' . $errno),
                 $url
             );
         }
@@ -163,7 +168,7 @@ function nexbreak_proxy_request(string $method, string $url, array $headers, ?st
     }
     if ($raw === false) {
         return nexbreak_proxy_fail(
-            'controller unreachable (allow_url_fopen may be Off; install php-curl)',
+            'backend unreachable (allow_url_fopen may be Off; install php-curl)',
             $url
         );
     }

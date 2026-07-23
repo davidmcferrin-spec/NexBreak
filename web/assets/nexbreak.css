@@ -322,6 +322,16 @@ table.data tbody tr:hover { background: var(--row-selected); }
 .panel-meta.bad { color: var(--bad); }
 
 .muted { color: var(--dim); }
+
+.bitrate-readout {
+  margin: 0.5rem 0 1rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--border, #2a3340);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  line-height: 1.55;
+}
+.bitrate-readout strong { font-variant-numeric: tabular-nums; }
 .warn-banner {
   color: var(--muted);
   font-size: 12px;

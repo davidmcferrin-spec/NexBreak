@@ -14,7 +14,7 @@ require __DIR__ . '/include/header.php';
 
 <p class="warn-banner">
   Restart / start / stop go through allowlisted sudo wrappers.
-  Core units (controller, MediaMTX) can be restarted but not disabled from this page.
+  Core units (controller, verify, MediaMTX) can be restarted but not disabled from this page.
 </p>
 
 <div class="ops-layout">

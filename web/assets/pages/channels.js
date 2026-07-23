@@ -62,13 +62,33 @@
     );
   }
 
+  function fmtBitrate(ch) {
+    var sensed = ch.sensed_bitrate_kbps;
+    var out = ch.output_bitrate_kbps;
+    if (sensed == null && out == null) return "—";
+    var s = sensed != null ? sensed + " in" : "? in";
+    var o = out != null ? out + " out" : "? out";
+    return s + " / " + o;
+  }
+
+  function setBitrateReadout(prefix, ch) {
+    var sensed = ch.sensed_bitrate_kbps;
+    var out = ch.output_bitrate_kbps;
+    var sensedEl = document.getElementById(prefix + "-bitrate-sensed");
+    var outEl = document.getElementById(prefix + "-bitrate-out");
+    var hidden = document.getElementById(prefix + "-bitrate");
+    if (sensedEl) sensedEl.textContent = sensed != null ? String(sensed) : "—";
+    if (outEl) outEl.textContent = out != null ? String(out) : "—";
+    if (hidden) hidden.value = out != null ? String(out) : "";
+  }
+
   function renderList(el, channels, kind) {
     if (!channels.length) {
       el.innerHTML = '<div class="empty">None</div>';
       return;
     }
     el.innerHTML =
-      '<table class="data"><thead><tr><th>Status</th><th>Name</th><th>Type</th><th>Svc</th><th></th></tr></thead><tbody>' +
+      '<table class="data"><thead><tr><th>Status</th><th>Name</th><th>Type</th><th>Bitrate</th><th>Svc</th><th></th></tr></thead><tbody>' +
       channels
         .map(function (c) {
           var detail = "";
@@ -128,6 +148,8 @@
             detail +
             "</td><td>" +
             api.esc(c.input_type || c.output_type) +
+            '</td><td class="muted" title="sensed in / output target">' +
+            api.esc(fmtBitrate(c)) +
             "</td><td class=\"muted\">@" +
             api.esc(c.service_name) +
             '</td><td><button type="button" data-edit="' +
@@ -239,7 +261,7 @@
     document.getElementById("p-ingest_mode").value = ch.ingest_mode || "copy";
     document.getElementById("p-delay").value = ch.splice_insertion_delay_ms || 0;
     document.getElementById("p-feed_port").value = ch.local_feed_port || "";
-    document.getElementById("p-bitrate").value = ch.target_bitrate_kbps || "";
+    setBitrateReadout("p", ch);
     document.getElementById("p-preview_path").value = ch.preview_path || "";
     document.getElementById("p-preview_enabled").value = String(
       ch.preview_enabled == null ? 1 : Number(ch.preview_enabled)
@@ -289,7 +311,7 @@
     document.getElementById("e-srt_listen_port").value = ch.srt_listen_port || "";
     document.getElementById("e-hls_mode").value = ch.hls_mode || "origin_pull";
     document.getElementById("e-hls_push_url").value = ch.hls_push_url || "";
-    document.getElementById("e-bitrate").value = ch.target_bitrate_kbps || "";
+    setBitrateReadout("e", ch);
     document.getElementById("e-enabled").value = String(Number(ch.enabled) || 0);
     syncEgrFields();
     egrEditor.hidden = false;
@@ -397,7 +419,6 @@
       ingest_mode: document.getElementById("p-ingest_mode").value,
       splice_insertion_delay_ms: Number(document.getElementById("p-delay").value),
       local_feed_port: Number(document.getElementById("p-feed_port").value),
-      target_bitrate_kbps: Number(document.getElementById("p-bitrate").value) || null,
       preview_path: document.getElementById("p-preview_path").value || null,
       preview_enabled: Number(document.getElementById("p-preview_enabled").value),
       caption_policy: document.getElementById("p-caption-policy").value,
@@ -454,7 +475,6 @@
         : null,
       hls_mode: document.getElementById("e-hls_mode").value,
       hls_push_url: document.getElementById("e-hls_push_url").value || null,
-      target_bitrate_kbps: Number(document.getElementById("e-bitrate").value) || null,
       enabled: Number(document.getElementById("e-enabled").value),
     };
     var res = await api.post("/v1/egress/" + id + "/config", body);

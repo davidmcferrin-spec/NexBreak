@@ -78,7 +78,12 @@ require __DIR__ . '/include/header.php';
     </label>
     <label>Splice delay (ms) <input type="number" id="p-delay" min="0" step="100"></label>
     <label>Local feed port <input type="number" id="p-feed_port"></label>
-    <label>Target bitrate (kbps) <input type="number" id="p-bitrate"></label>
+    <div class="bitrate-readout" id="p-bitrate-box">
+      <div class="muted" style="font-size:0.85rem;margin-bottom:4px">Bitrate (auto from live feed)</div>
+      <div>Sensed input: <strong id="p-bitrate-sensed">—</strong> kbps</div>
+      <div>Output target: <strong id="p-bitrate-out">—</strong> kbps <span class="muted">(+10 for captions)</span></div>
+    </div>
+    <input type="hidden" id="p-bitrate" value="">
     <label>Preview path <input id="p-preview_path" placeholder="nb1"></label>
     <label>Preview
       <select id="p-preview_enabled">
@@ -142,7 +147,12 @@ require __DIR__ . '/include/header.php';
       </select>
     </label>
     <label class="egr-hls egr-hls-push">Push URL <input id="e-hls_push_url" placeholder="https://cdn.example/ingest/…"></label>
-    <label>Target bitrate (kbps) <input type="number" id="e-bitrate"></label>
+    <div class="bitrate-readout" id="e-bitrate-box">
+      <div class="muted" style="font-size:0.85rem;margin-bottom:4px">Bitrate (from routed input)</div>
+      <div>Sensed input: <strong id="e-bitrate-sensed">—</strong> kbps</div>
+      <div>Output target: <strong id="e-bitrate-out">—</strong> kbps <span class="muted">(+10 for captions)</span></div>
+    </div>
+    <input type="hidden" id="e-bitrate" value="">
     <label>Enabled
       <select id="e-enabled">
         <option value="1">Yes</option>

@@ -16,6 +16,16 @@ function nexbreak_api_base(): string
     return 'http://127.0.0.1:8787';
 }
 
+/** SCTE Verify API (nexbreak-verify). Override via NEXBREAK_VERIFY_API_BASE. */
+function nexbreak_verify_api_base(): string
+{
+    $env = $_SERVER['NEXBREAK_VERIFY_API_BASE'] ?? getenv('NEXBREAK_VERIFY_API_BASE');
+    if (is_string($env) && $env !== '') {
+        return rtrim($env, '/');
+    }
+    return 'http://127.0.0.1:8788';
+}
+
 function nexbreak_asset(string $path): string
 {
     $path = '/' . ltrim($path, '/');

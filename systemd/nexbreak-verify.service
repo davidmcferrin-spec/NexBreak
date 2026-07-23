@@ -1,21 +1,20 @@
 [Unit]
-Description=NexBreak controller (config API + routing + audit)
+Description=NexBreak SCTE Verify API (return-feed monitor)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/nexbreak/bin/nexbreak-controller --db /var/lib/nexbreak/nexbreak.sqlite --host 127.0.0.1 --port 8787
+ExecStart=/usr/bin/python3 /opt/nexbreak/bin/nexbreak-verify --db /var/lib/nexbreak/nexbreak.sqlite --host 127.0.0.1 --port 8788
 Restart=always
 RestartSec=2
 User=nexbreak
 Group=nexbreak
-# Shared /run/nexbreak with proc@ (control sockets). SCTE verify state lives
-# under nexbreak-verify, not this unit.
+# Owns /run/nexbreak/scte for watch pid/state (isolated from controller).
 RuntimeDirectory=nexbreak
 RuntimeDirectoryMode=0770
 Environment=NEXBREAK_RUN_DIR=/run/nexbreak
-# Connect to /run/nexbreak/proc-*.sock (created by nexbreak-proc@ instances)
+Environment=NEXBREAK_VERIFY_PORT=8788
 ReadWritePaths=/var/lib/nexbreak /var/log/nexbreak /run/nexbreak
 NoNewPrivileges=true
 ProtectSystem=strict

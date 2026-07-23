@@ -13,6 +13,12 @@ Restart=always
 RestartSec=1
 User=nexbreak
 Group=nexbreak
+# Don't wait on a stuck SRT listener — SIGTERM then SIGKILL the cgroup quickly.
+TimeoutStopSec=8
+KillMode=control-group
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
+SendSIGKILL=yes
 
 # Same isolation model as nexbreak-proc@ — reads whatever local feed the
 # router currently assigns it. Restarting an egress instance to change its

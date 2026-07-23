@@ -9,6 +9,8 @@ Captions are accepted over **UDP** (plain text) and embedded as **A/53 CC data**
 - **Caption Ingest:** UDP (e.g., from Whisper‑based STT)
 
 > Default behavior: decodes video, re-encodes with **H.264** (`libx264`, with `a53cc=1`) so 608 CC are carried as **user data SEI (GA94)** in the H.264 stream.
+>
+> Video bitrate: `max(input, --bitrate hint) × 1.05` so captions never force a downscale below source. Pass `--bitrate=14000k` (or env `NEXBREAK_CC_INJECT_VBITRATE`).
 
 ---
 

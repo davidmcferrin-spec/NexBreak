@@ -12,7 +12,7 @@ fi
 UNITS=()
 for UNIT in "$@"; do
   case "$UNIT" in
-    nexbreak-controller|nexbreak-mediamtx|nexbreak-proc@[0-9]|nexbreak-egress@[0-9])
+    nexbreak-controller|nexbreak-verify|nexbreak-mediamtx|nexbreak-proc@[0-9]|nexbreak-egress@[0-9])
       UNITS+=("$UNIT")
       ;;
     *)

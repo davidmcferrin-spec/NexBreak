@@ -270,13 +270,13 @@ def run_lce(
         "pipe:1",
         f"--cc-udp={host}:{port}",
         "--venc=libx264",
+        f"--bitrate={bitrate}",
         f"--bootstrap={'1' if bootstrap else '0'}",
         f"--linger_ms={int(linger_ms)}",
     ]
     log.info("cc-inject LCE: %s", " ".join(argv))
-    # Pass bitrate hint via env for ops; LCE uses its own encode defaults.
     env = os.environ.copy()
-    env.setdefault("NEXBREAK_CC_INJECT_VBITRATE", bitrate)
+    env["NEXBREAK_CC_INJECT_VBITRATE"] = bitrate
 
     proc = subprocess.Popen(
         argv,

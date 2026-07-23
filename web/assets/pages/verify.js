@@ -188,7 +188,7 @@
         '<div class="empty">Verify API failed: ' +
         api.esc(String(detail)) +
         ". Redeploy with <code>sudo bash scripts/install-ubuntu.sh install</code> " +
-        "and <code>sudo systemctl restart nexbreak-controller</code>.</div>";
+        "and <code>sudo systemctl restart nexbreak-verify</code>.</div>";
       return;
     }
     if (r.data.ok === false) {

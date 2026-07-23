@@ -154,7 +154,7 @@ def send_cc_udp(
     addr: Optional[tuple[str, int]],
     text: str,
 ) -> None:
-    """Direct LCE caption ingest (plain ASCII line). Cue bridge also forwards."""
+    """Optional direct LCE UDP (unused by default — cue→bridge owns inject)."""
     if udp is None or addr is None:
         return
     line = (text or "").replace("\r", " ").replace("\n", " ").strip()
@@ -214,11 +214,11 @@ def main() -> int:
     sock_path = args.cue_sock or cue_sock_path(args.service_name)
     blacklist, lexicon = load_lists(args.db)
     model, reason = try_load_vosk(args.model or "")
-    cc_addr = parse_cc_udp(args.cc_udp or "")
-    cc_udp_sock: Optional[socket.socket] = None
-    if cc_addr:
-        cc_udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        log.info("LCE caption UDP → %s:%s", cc_addr[0], cc_addr[1])
+    if args.cc_udp:
+        log.warning(
+            "--cc-udp ignored (captions go cue→cc-inject bridge only; "
+            "direct UDP caused duplicate inject)"
+        )
     log.info(
         "caption worker up service=%s feed=%s:%s cues=%s — %s (blacklist=%s lexicon=%s)",
         args.service_name,
@@ -366,9 +366,8 @@ def main() -> int:
                     state_name = "final"
                 last_final_at = time.time()
                 seq += 1
+                # Cue socket only — cc-inject bridges to LCE UDP (never dual-send).
                 cue = send_cue(cue, text=text, clear=not text, seq=seq)
-                if text:
-                    send_cc_udp(cc_udp_sock, cc_addr, text)
             else:
                 try:
                     partial = json.loads(rec.PartialResult())
@@ -380,7 +379,6 @@ def main() -> int:
                     state_name = "partial"
                     seq += 1
                     cue = send_cue(cue, text=ptext, clear=False, seq=seq)
-                    send_cc_udp(cc_udp_sock, cc_addr, ptext)
                 elif last_partial and (time.time() - last_final_at) > 8.0:
                     last_partial = ""
                     seq += 1

@@ -15,6 +15,11 @@ Group=nexbreak
 RuntimeDirectory=nexbreak
 RuntimeDirectoryMode=0770
 Environment=NEXBREAK_RUN_DIR=/run/nexbreak
+TimeoutStopSec=10
+KillMode=control-group
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
+SendSIGKILL=yes
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

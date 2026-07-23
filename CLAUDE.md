@@ -72,8 +72,13 @@ another, and a crash in one must never take down another.
   `nexbreak-egress@<id>.service`, same isolation model.
 - **Controller** (single instance): owns the SQLite config/state/audit store,
   serves the control API and the routing table, and is what the web UI and
-  panels talk to. It also needs a safe way to start/stop/restart specific
-  systemd instances — see security note below.
+  panels talk to for config/splice/routing. It also needs a safe way to
+  start/stop/restart specific systemd instances — see security note below.
+- **Verify** (single instance, `nexbreak-verify`): SCTE return-feed monitor
+  API on loopback `:8788` — spawn/stop `nexbreak-scte-watch`, `/run/nexbreak/scte`
+  state, `scte_sightings`. Isolated from the controller so ProtectSystem
+  / RuntimeDirectory ownership for watch state cannot break the control plane.
+  PHP `/api` proxies `/v1/verify/*` here; everything else goes to the controller.
 - The processing↔egress decoupling is what makes the router possible: a
   processing service doesn't know or care which egress service (if any)
   is currently consuming its feed. Reassigning "input 1 now feeds output 3"
@@ -158,15 +163,17 @@ Done:
   `rtsp_transport`, `preview_enabled`, `preview_path`)
 - systemd units + `scripts/install-ubuntu.sh` + Apache vhost + MediaMTX
 - `nexbreak-controller` REST API; splice fan-out via `/run/nexbreak/proc-*.sock`
+- `nexbreak-verify` SCTE return-feed Verify API (`:8788`); PHP `/api` routes
+  `/v1/verify/*` there (not the controller)
 - `nexbreak-proc`: ffmpeg RTSP/SRT ingest → tsp spliceinject → UDP feed
   + MediaMTX RTSP preview publisher (WHEP)
   + caption policy (auto preserve / force ASR / off) with CEA-608 A/53 insert
     into the local feed when ASR is required; Vosk sidecar + cc-inject
 - `nexbreak-egress`: UDP local feed → SRT (ffmpeg)
 - `web/` UI: Dashboard, Roll (with live preview + CC overlay + policy cycle), Preview,
-  Channels (processing + egress editors), Router, Captions, Services
-  (systemd/journal via allowlisted sudo wrappers), Metrics (audit-derived
-  splice/config/routing activity), Audit; `/api` PHP proxy to controller
+  Channels (processing + egress editors), Router, Captions, Verify, Services
+  (systemd/journal via allowlisted sudo wrappers — no controller), Metrics (audit-derived
+  splice/config/routing activity), Audit; `/api` PHP proxy to controller/verify
 
 Next:
 - Hardware bring-up of channel 1 against a real RTSP source

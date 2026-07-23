@@ -53,6 +53,8 @@ def _handle_signal(signum, _frame):
     global _stop
     log.info("signal %s — shutting down", signum)
     _stop = True
+    # Kill ffmpeg immediately — SRT listener otherwise blocks until the client leaves.
+    _kill(grace_s=0.4)
 
 
 def _routed_source(conn, egress_id: int) -> Optional[dict[str, Any]]:
@@ -68,17 +70,28 @@ def _routed_source(conn, egress_id: int) -> Optional[dict[str, Any]]:
     return row_to_dict(cur.fetchone())
 
 
-def _kill() -> None:
+def _kill(grace_s: float = 1.0) -> None:
     global _proc
     if _proc is None:
         return
-    if _proc.poll() is None:
-        _proc.terminate()
-        try:
-            _proc.wait(timeout=5)
-        except Exception:
-            _proc.kill()
+    proc = _proc
     _proc = None
+    if proc.poll() is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=max(0.2, grace_s))
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=1.0)
+            except Exception:
+                pass
 
 
 def _stderr_watch(proc: Popen, stream) -> None:
