@@ -15,9 +15,10 @@ require __DIR__ . '/include/header.php';
 <section class="panel">
   <h2>Listen</h2>
   <p class="warn-banner" style="margin-bottom:12px">
-    Listener SRT outputs are checked with a second local caller into our port (true return).
-    Push (caller/rendezvous) outputs fall back to the routed post-splice local feed —
-    the same TS egress copies.
+    Verify taps the routed post-splice local feed (same MPEG-TS egress remuxes)
+    so it does not steal the live SRT client. Status should show
+    <strong>listening</strong> then <strong>stream locked</strong> with rising
+    byte counts — then fire a splice from Roll to confirm SCTE.
   </p>
   <div class="bar" style="margin-bottom:12px; flex-wrap:wrap; gap:8px">
     <label style="display:flex; align-items:center; gap:8px">

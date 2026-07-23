@@ -6,14 +6,15 @@ Tap rule (see nexbreak_verify.resolve_tap):
   Prefer routed post-splice local MPEG-TS feed (reliable; no SRT client fight).
   Fall back to srt://127.0.0.1:<port>?mode=caller when no processing is routed.
 
-Pipeline: ffmpeg (copy) | tsp -P tables --tid 0xFC → parse → JSON + SQLite.
+Pipeline: ffmpeg (copy) | pump(count bytes) | tsp -P tables --tid 0xFC
+  → parse → JSON state + SQLite sightings.
+
 Spawned on-demand by nexbreak-verify (Verify page). Stdlib only.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import shutil
@@ -24,7 +25,7 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -50,21 +51,57 @@ def _handle(signum, _frame):
     _stop = True
 
 
-def _proc_read_bytes(pid: int) -> int:
-    try:
-        with open(f"/proc/{pid}/io", encoding="utf-8") as fh:
-            for line in fh:
-                if line.startswith("read_bytes:"):
-                    return int(line.split()[1])
-    except Exception:
-        return 0
-    return 0
-
-
 def _local(tag: str) -> str:
     if "}" in tag:
         return tag.rsplit("}", 1)[-1]
     return tag
+
+
+def _kill_proc(proc: Optional[subprocess.Popen], *, grace: float = 2.0) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=grace)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=1.0)
+        except Exception:
+            pass
+
+
+def _pump_bytes(
+    src,
+    dst,
+    counter: list[int],
+    *,
+    stop_flag: Callable[[], bool],
+) -> None:
+    """Copy MPEG-TS ffmpeg→tsp while counting bytes (UDP does not bump /proc io)."""
+    try:
+        while not stop_flag():
+            chunk = src.read(65536)
+            if not chunk:
+                break
+            counter[0] += len(chunk)
+            try:
+                dst.write(chunk)
+            except BrokenPipeError:
+                break
+    except Exception as exc:  # noqa: BLE001
+        log.debug("pump ended: %s", exc)
+    finally:
+        try:
+            dst.close()
+        except Exception:
+            pass
 
 
 def parse_scte_xml(xml_text: str) -> Optional[dict[str, Any]]:
@@ -72,13 +109,11 @@ def parse_scte_xml(xml_text: str) -> Optional[dict[str, Any]]:
     text = xml_text.strip()
     if not text:
         return None
-    # log-xml-line may prefix logger noise; keep from first '<'
     if "<" in text:
         text = text[text.index("<") :]
     try:
         root = ET.fromstring(text)
     except ET.ParseError:
-        # Wrap fragment
         try:
             root = ET.fromstring(f"<wrap>{text}</wrap>")
         except ET.ParseError:
@@ -91,7 +126,6 @@ def parse_scte_xml(xml_text: str) -> Optional[dict[str, Any]]:
             insert = el
             break
     if insert is None:
-        # Still record that we saw a splice_information_table
         for el in root.iter():
             if _local(el.tag).lower() in (
                 "splice_information_table",
@@ -107,15 +141,20 @@ def parse_scte_xml(xml_text: str) -> Optional[dict[str, Any]]:
         return None
 
     attrs = {k.lower().replace("-", "_"): v for k, v in insert.attrib.items()}
-    # TSDuck uses both styles
     eid = attrs.get("splice_event_id") or attrs.get("event_id")
     try:
         event_id = int(eid) if eid is not None else None
     except ValueError:
         event_id = None
 
-    cancel_raw = attrs.get("splice_event_cancel") or attrs.get("splice_event_cancel_indicator")
-    cancel = str(cancel_raw).lower() in ("true", "1", "yes") if cancel_raw is not None else False
+    cancel_raw = attrs.get("splice_event_cancel") or attrs.get(
+        "splice_event_cancel_indicator"
+    )
+    cancel = (
+        str(cancel_raw).lower() in ("true", "1", "yes")
+        if cancel_raw is not None
+        else False
+    )
 
     oon_raw = attrs.get("out_of_network") or attrs.get("out_of_network_indicator")
     if oon_raw is None:
@@ -268,7 +307,7 @@ def main() -> int:
         ffmpeg,
         "-hide_banner",
         "-loglevel",
-        "error",
+        "warning",
         "-nostdin",
         "-fflags",
         "+genpts+discardcorrupt+nobuffer",
@@ -282,7 +321,6 @@ def main() -> int:
         "mpegts",
         "pipe:1",
     ]
-    # Prefer log-xml-line (one XML blob per section on stderr via tsp logger).
     tsp_argv = [
         tsp,
         "-I",
@@ -297,26 +335,10 @@ def main() -> int:
         "drop",
     ]
 
-    log.info("watch egress=%s kind=%s url=%s", eid, args.tap_kind, args.tap_url)
-    ff = subprocess.Popen(
-        ff_argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-    tsp_proc = subprocess.Popen(
-        tsp_argv,
-        stdin=ff.stdout,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-    if ff.stdout is not None:
-        ff.stdout.close()
-
     recent: list[dict[str, Any]] = []
     lock = threading.Lock()
     window_s = max(10.0, args.delay_ms / 1000.0 + 5.0)
+    byte_counter = [0]
 
     def bump_state(**kwargs: Any) -> None:
         with lock:
@@ -367,6 +389,7 @@ def main() -> int:
             last_event_id=parsed.get("event_id"),
             out_of_network=parsed.get("out_of_network"),
             locked=True,
+            error=None,
         )
         log.info(
             "SCTE seen egress=%s event_id=%s type=%s verified=%s",
@@ -376,61 +399,107 @@ def main() -> int:
             verified,
         )
 
-    def reader() -> None:
-        assert tsp_proc.stderr is not None
+    def read_tsp_stderr(stream) -> None:
         buf = ""
-        for line in tsp_proc.stderr:
-            if _stop:
-                break
-            if SCTE_MARKER not in line:
-                continue
-            # Format: ... ##scte## <?xml ...>  or remainder of multi-line
-            idx = line.find(SCTE_MARKER)
-            chunk = line[idx + len(SCTE_MARKER) :].strip()
-            if chunk.startswith("<"):
-                on_scte(chunk)
-            else:
-                buf += chunk
-                if "</" in buf and ">" in buf:
-                    on_scte(buf)
-                    buf = ""
+        try:
+            while not _stop:
+                raw = stream.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace")
+                if SCTE_MARKER not in line:
+                    continue
+                idx = line.find(SCTE_MARKER)
+                chunk = line[idx + len(SCTE_MARKER) :].strip()
+                if chunk.startswith("<"):
+                    on_scte(chunk)
+                else:
+                    buf += chunk
+                    if "</" in buf and ">" in buf:
+                        on_scte(buf)
+                        buf = ""
+        except Exception as exc:  # noqa: BLE001
+            log.debug("tsp stderr reader ended: %s", exc)
 
-    t = threading.Thread(target=reader, name="scte-stderr", daemon=True)
-    t.start()
+    log.info("watch egress=%s kind=%s url=%s", eid, args.tap_kind, args.tap_url)
+    bump_state(listening=True, locked=False, error=None)
 
     try:
         while not _stop:
-            if ff.poll() is not None or tsp_proc.poll() is not None:
-                err = (
-                    f"ffmpeg exited {ff.returncode}"
-                    if ff.poll() is not None
-                    else f"tsp exited {tsp_proc.returncode}"
-                )
-                bump_state(listening=True, locked=False, error=err)
-                log.error("%s — exiting watch", err)
-                break
-            nbytes = _proc_read_bytes(ff.pid)
-            locked = nbytes > 0 or state.get("last_scte_at") is not None
-            bump_state(
-                listening=True,
-                bytes_seen=nbytes,
-                last_byte_at=time.time() if nbytes else state.get("last_byte_at"),
-                locked=bool(locked),
-                error=None,
+            ff = subprocess.Popen(
+                ff_argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
-            time.sleep(1.0)
+            tsp_proc = subprocess.Popen(
+                tsp_argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            assert ff.stdout is not None and tsp_proc.stdin is not None
+            pump = threading.Thread(
+                target=_pump_bytes,
+                args=(ff.stdout, tsp_proc.stdin, byte_counter),
+                kwargs={"stop_flag": lambda: _stop},
+                name="scte-pump",
+                daemon=True,
+            )
+            pump.start()
+            reader = threading.Thread(
+                target=read_tsp_stderr,
+                args=(tsp_proc.stderr,),
+                name="scte-stderr",
+                daemon=True,
+            )
+            reader.start()
+
+            last_bytes = byte_counter[0]
+            while not _stop:
+                if ff.poll() is not None or tsp_proc.poll() is not None:
+                    err = (
+                        f"ffmpeg exited {ff.returncode}"
+                        if ff.poll() is not None
+                        else f"tsp exited {tsp_proc.returncode}"
+                    )
+                    ff_err = ""
+                    try:
+                        if ff.stderr is not None:
+                            ff_err = (
+                                ff.stderr.read(400)
+                                .decode("utf-8", errors="replace")
+                                .strip()
+                            )
+                    except Exception:
+                        pass
+                    if ff_err:
+                        err = f"{err}: {ff_err[:200]}"
+                    bump_state(listening=True, locked=False, error=err)
+                    log.warning("%s — restarting tap in 2s", err)
+                    break
+
+                nbytes = byte_counter[0]
+                grew = nbytes > last_bytes
+                if grew:
+                    last_bytes = nbytes
+                locked = nbytes > 0 or state.get("last_scte_at") is not None
+                bump_state(
+                    listening=True,
+                    bytes_seen=nbytes,
+                    last_byte_at=(
+                        time.time() if grew else state.get("last_byte_at")
+                    ),
+                    locked=bool(locked),
+                    error=None if locked else state.get("error"),
+                )
+                time.sleep(0.5)
+
+            _kill_proc(tsp_proc)
+            _kill_proc(ff)
+            if _stop:
+                break
+            time.sleep(2.0)
     finally:
-        _stop = True
-        for p in (tsp_proc, ff):
-            if p.poll() is None:
-                p.terminate()
-        deadline = time.time() + 3
-        for p in (tsp_proc, ff):
-            if p.poll() is None:
-                try:
-                    p.wait(timeout=max(0.1, deadline - time.time()))
-                except Exception:
-                    p.kill()
         if conn is not None:
             try:
                 conn.close()
@@ -441,7 +510,7 @@ def main() -> int:
             pid_path.unlink()
         except OSError:
             pass
-        log.info("watch exit egress=%s", eid)
+        log.info("watch exit egress=%s bytes=%s", eid, byte_counter[0])
     return 0
 
 

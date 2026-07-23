@@ -5,6 +5,7 @@
   var selectedId = null;
   var listening = false;
   var pollTimer = null;
+  var missCount = 0;
 
   function sel() {
     return document.getElementById("verify-egress");
@@ -68,12 +69,12 @@
     bits.push(
       live.listening
         ? '<span class="badge ok">listening</span>'
-        : '<span class="badge dim">watch stopped</span>'
+        : '<span class="badge warn">watch stopped</span>'
     );
     if (live.tap_kind) bits.push('<span class="badge dim">' + api.esc(live.tap_kind) + "</span>");
     if (live.bytes_seen != null) {
       bits.push(
-        '<span class="muted">' + api.esc(String(live.bytes_seen)) + " bytes read</span>"
+        '<span class="muted">' + api.esc(String(live.bytes_seen)) + " bytes</span>"
       );
     }
     if (live.last_scte_at) {
@@ -89,8 +90,10 @@
       } else if (live.out_of_network === false) {
         bits.push('<span class="badge ok">return to network</span>');
       }
-    } else {
-      bits.push('<span class="muted">No SCTE seen yet on this tap</span>');
+    } else if (listening || live.listening) {
+      bits.push(
+        '<span class="muted">Listening — fire a splice from Roll to confirm SCTE</span>'
+      );
     }
     if (live.error) {
       bits.push('<span class="badge warn">' + api.esc(String(live.error)) + "</span>");
@@ -154,6 +157,7 @@
     document.getElementById("btn-listen").disabled = listening;
     document.getElementById("btn-stop").disabled = !listening;
     sel().disabled = listening;
+    if (!listening) missCount = 0;
   }
 
   function stopPoll() {
@@ -168,9 +172,21 @@
     var r = await api.get("/v1/verify/" + selectedId + "/live");
     if (!r.ok || !r.data) return;
     var live = r.data.live || {};
-    if (!live.listening && listening) {
-      setListeningUi(false);
-      stopPoll();
+    if (listening) {
+      if (live.listening) {
+        missCount = 0;
+      } else {
+        missCount += 1;
+        // Require a few consecutive misses so a brief restart doesn't flip the UI.
+        if (missCount >= 5) {
+          setListeningUi(false);
+          stopPoll();
+          api.toast(
+            (live && live.error) || "Verify watch stopped",
+            "error"
+          );
+        }
+      }
     }
     renderStatus(live);
     renderEvents(live, r.data.sightings);
@@ -261,15 +277,30 @@
     selectedId = Number(item.egress.id);
     var btn = document.getElementById("btn-listen");
     btn.disabled = true;
+    btn.textContent = "Starting…";
     var r = await api.post("/v1/verify/" + selectedId + "/listen", {});
+    btn.textContent = "Listen";
     if (!r.ok || !r.data || !r.data.ok) {
       btn.disabled = false;
-      api.toast((r.data && r.data.error) || "Listen failed", "error");
+      var err =
+        (r.data && r.data.error) ||
+        ("Listen failed (HTTP " + (r.status || "?") + ")");
+      api.toast(err, "error");
+      renderStatus((r.data && r.data.live) || { listening: false, error: err });
       return;
     }
+    missCount = 0;
     setListeningUi(true);
-    api.toast("Listening on " + (r.data.tap && r.data.tap.tap_kind), "success");
-    renderStatus(r.data.live);
+    api.toast(
+      "Listening — " + ((r.data.tap && r.data.tap.label) || (r.data.tap && r.data.tap.tap_kind) || "tap ok"),
+      "success"
+    );
+    if (r.data.tap) {
+      var cur = currentItem();
+      if (cur) cur.tap = r.data.tap;
+      renderTap();
+    }
+    renderStatus(r.data.live || { listening: true });
     stopPoll();
     pollTimer = setInterval(pollLive, 1000);
     pollLive();

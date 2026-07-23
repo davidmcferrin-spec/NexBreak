@@ -5,8 +5,12 @@ nexbreak-caption-worker — per-stream ASR → cue socket for cc-inject.
 - Taps audio from the local MPEG-TS UDP feed (ffmpeg → s16le 16 kHz mono).
 - Optional Vosk when model + package available.
 - Applies caption_blacklist / caption_lexicon from SQLite.
-- Publishes JSON cues to the inject cue socket (finals only — not partial
-  hypotheses). Never blocks the media path.
+- Publishes JSON cues paced for live CEA-608 readability (FCC/WCAG-oriented):
+    • debounce / max lag so text appears within ~2–3s of speech
+    • min on-screen dwell ≥1.5s between rolls
+    • clear after max dwell 6s with no new text
+    • prefer ~32-char CEA-608 row chunks at a readable pace
+  Never blocks the media path.
 
 Stdlib preferred; vosk is optional.
 """
@@ -36,6 +40,137 @@ from nexbreak_verify import asr_state_path, atomic_write_json  # noqa: E402
 
 log = logging.getLogger("nexbreak-caption-worker")
 _stop = False
+
+# Live CC pacing (FCC TV / WCAG-oriented defaults for CEA-608).
+# Override via env without code changes.
+_DEFAULT_DEBOUNCE_MS = 500  # pause before committing a stable hypothesis
+_DEFAULT_MIN_DWELL_MS = 1500  # min time a caption stays before the next roll
+_DEFAULT_MAX_DWELL_MS = 6000  # clear if nothing new
+_DEFAULT_MAX_LAG_MS = 2500  # force commit so lag stays in the 2–3s window
+_DEFAULT_ROW_CHARS = 32  # CEA-608 row width — natural chunk boundary
+
+
+def _env_ms(name: str, default_ms: int, *, lo: int = 100, hi: int = 15000) -> float:
+    raw = os.environ.get(name, str(default_ms))
+    try:
+        ms = int(float(raw))
+    except (TypeError, ValueError):
+        ms = default_ms
+    return max(lo, min(hi, ms)) / 1000.0
+
+
+def _env_int(name: str, default: int, *, lo: int = 8, hi: int = 64) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        v = int(float(raw))
+    except (TypeError, ValueError):
+        v = default
+    return max(lo, min(hi, v))
+
+
+def cea608_chunk(text: str, width: int = 32) -> str:
+    """
+    Fit a live caption into one CEA-608 row (~32 chars).
+    Prefer the most recent words so the on-screen line tracks speech.
+    """
+    text = (text or "").strip()
+    if not text or len(text) <= width:
+        return text
+    window = text[-width:]
+    # If the clip started mid-word, drop the partial leading token.
+    if len(text) > width and text[-width - 1] not in " \t" and " " in window:
+        window = window.split(" ", 1)[-1]
+    return window.strip() or text[:width]
+
+
+class CaptionPacer:
+    """
+    Gate cue emits for readability + sync:
+      - min dwell between on-screen updates
+      - coalesce newer text while dwelling
+      - clear after max dwell
+    """
+
+    def __init__(
+        self,
+        *,
+        min_dwell_s: float,
+        max_dwell_s: float,
+        debounce_s: float,
+        max_lag_s: float,
+        row_chars: int,
+    ) -> None:
+        self.min_dwell_s = min_dwell_s
+        self.max_dwell_s = max_dwell_s
+        self.debounce_s = debounce_s
+        self.max_lag_s = max_lag_s
+        self.row_chars = row_chars
+        self.last_sent = ""
+        self.last_sent_at = 0.0
+        self.pending: Optional[str] = None
+        self.segment_started_at = 0.0
+
+    def note_partial_growth(self, now: float, had_text: bool) -> None:
+        if had_text and self.segment_started_at <= 0:
+            self.segment_started_at = now
+        if not had_text:
+            self.segment_started_at = 0.0
+
+    def request(self, text: str, now: float) -> Optional[str]:
+        """Queue or immediately release a caption line. Returns text to send, or None."""
+        text = (text or "").strip()
+        if not text or text == self.last_sent:
+            return None
+        if self.last_sent and (now - self.last_sent_at) < self.min_dwell_s:
+            self.pending = text
+            return None
+        return self._release(text, now)
+
+    def flush_due(self, now: float) -> Optional[str]:
+        if not self.pending:
+            return None
+        if self.last_sent and (now - self.last_sent_at) < self.min_dwell_s:
+            return None
+        text = self.pending
+        self.pending = None
+        if not text or text == self.last_sent:
+            return None
+        return self._release(text, now)
+
+    def clear_due(self, now: float, *, speech_active: bool) -> bool:
+        if speech_active or not self.last_sent:
+            return False
+        return (now - self.last_sent_at) >= self.max_dwell_s
+
+    def should_force_row(self, partial: str) -> bool:
+        if not partial or len(partial) < self.row_chars:
+            return False
+        chunk = cea608_chunk(partial, self.row_chars)
+        return bool(chunk) and chunk != self.last_sent
+
+    def should_force_lag(self, now: float, partial: str) -> bool:
+        if not partial:
+            return False
+        chunk = cea608_chunk(partial, self.row_chars)
+        if not chunk or chunk == self.last_sent:
+            return False
+        if self.segment_started_at <= 0:
+            return False
+        return (now - self.segment_started_at) >= self.max_lag_s
+
+    def mark_cleared(self, now: float) -> None:
+        self.last_sent = ""
+        self.last_sent_at = now
+        self.pending = None
+        self.segment_started_at = 0.0
+
+    def _release(self, text: str, now: float) -> str:
+        self.last_sent = text
+        self.last_sent_at = now
+        self.pending = None
+        # Continued speech after a forced row/lag commit starts a new lag window.
+        self.segment_started_at = now if text else 0.0
+        return text
 
 
 def write_asr_state(service_name: str, **fields) -> None:
@@ -305,8 +440,46 @@ def main() -> int:
     assert tap.stdout is not None
     last_partial = ""
     last_final = ""
-    last_final_at = time.time()
+    partial_changed_at = 0.0
     last_state_write = 0.0
+    pacer = CaptionPacer(
+        min_dwell_s=_env_ms("NEXBREAK_CAPTION_MIN_DWELL_MS", _DEFAULT_MIN_DWELL_MS),
+        max_dwell_s=_env_ms(
+            "NEXBREAK_CAPTION_MAX_DWELL_MS", _DEFAULT_MAX_DWELL_MS, lo=2000, hi=20000
+        ),
+        debounce_s=_env_ms("NEXBREAK_CAPTION_DEBOUNCE_MS", _DEFAULT_DEBOUNCE_MS),
+        max_lag_s=_env_ms(
+            "NEXBREAK_CAPTION_MAX_LAG_MS", _DEFAULT_MAX_LAG_MS, lo=500, hi=5000
+        ),
+        row_chars=_env_int("NEXBREAK_CAPTION_ROW_CHARS", _DEFAULT_ROW_CHARS),
+    )
+    log.info(
+        "caption pacing debounce=%.2fs min_dwell=%.2fs max_dwell=%.2fs max_lag=%.2fs row=%s",
+        pacer.debounce_s,
+        pacer.min_dwell_s,
+        pacer.max_dwell_s,
+        pacer.max_lag_s,
+        pacer.row_chars,
+    )
+
+    def emit(text: str, reason: str) -> None:
+        nonlocal cue, seq, last_final
+        line = cea608_chunk(text, pacer.row_chars) if text else ""
+        out = pacer.request(line, time.time()) if line else None
+        if not out:
+            return
+        seq += 1
+        cue = send_cue(cue, text=out, clear=False, seq=seq)
+        last_final = out
+        log.info("caption cue (%s): %s", reason, out[:120])
+
+    def emit_clear(reason: str) -> None:
+        nonlocal cue, seq
+        seq += 1
+        cue = send_cue(cue, text="", clear=True, seq=seq)
+        pacer.mark_cleared(time.time())
+        log.info("caption cue (clear:%s)", reason)
+
     write_asr_state(
         args.service_name,
         vosk_loaded=True,
@@ -354,6 +527,7 @@ def main() -> int:
             if cue is None:
                 cue = connect_cues(sock_path, retries=4)
 
+            now = time.time()
             state_name = "listening"
             if rec.AcceptWaveform(data):
                 try:
@@ -362,30 +536,56 @@ def main() -> int:
                     result = {}
                 text = apply_text(str(result.get("text") or ""), blacklist, lexicon)
                 last_partial = ""
-                last_final_at = time.time()
+                partial_changed_at = 0.0
+                pacer.note_partial_growth(now, False)
                 if text:
                     last_final = text
                     state_name = "final"
-                    seq += 1
-                    # Finals only → inject. Partials stay in ASR state for UI.
-                    cue = send_cue(cue, text=text, clear=False, seq=seq)
+                    emit(text, "final")
             else:
                 try:
                     partial = json.loads(rec.PartialResult())
                 except json.JSONDecodeError:
                     partial = {}
                 ptext = apply_text(str(partial.get("partial") or ""), blacklist, lexicon)
-                if ptext and ptext != last_partial:
+                if ptext != last_partial:
                     last_partial = ptext
+                    if ptext:
+                        partial_changed_at = now
+                        state_name = "partial"
+                    pacer.note_partial_growth(now, bool(ptext))
+                elif last_partial:
                     state_name = "partial"
-                    # Do NOT cue/inject partials — they hammer LCE with "to"/"to do"/…
-                elif last_partial and (time.time() - last_final_at) > 8.0:
-                    last_partial = ""
-                    seq += 1
-                    cue = send_cue(cue, text="", clear=True, seq=seq)
 
-            now = time.time()
-            if state_name in ("partial", "final") or (now - last_state_write) >= 1.0:
+                if last_partial and last_partial != pacer.last_sent:
+                    if pacer.should_force_row(last_partial):
+                        emit(last_partial, "row")
+                        state_name = "row"
+                    elif pacer.should_force_lag(now, last_partial):
+                        emit(last_partial, "lag")
+                        state_name = "lag"
+                    elif (
+                        partial_changed_at > 0
+                        and (now - partial_changed_at) >= pacer.debounce_s
+                    ):
+                        emit(last_partial, "stable")
+                        state_name = "stable"
+
+            due = pacer.flush_due(now)
+            if due:
+                seq += 1
+                cue = send_cue(cue, text=due, clear=False, seq=seq)
+                last_final = due
+                state_name = "dwell"
+                log.info("caption cue (dwell): %s", due[:120])
+
+            if pacer.clear_due(now, speech_active=bool(last_partial)):
+                emit_clear("max_dwell")
+                state_name = "clear"
+
+            if state_name in ("partial", "final", "stable", "row", "lag", "dwell", "clear") or (
+                now - last_state_write
+            ) >= 1.0:
                 last_state_write = now
                 write_asr_state(
                     args.service_name,
@@ -393,7 +593,11 @@ def main() -> int:
                     model=model_path,
                     reason=reason,
                     cue_connected=cue is not None,
-                    state=state_name if last_partial or state_name == "final" else "listening",
+                    state=(
+                        state_name
+                        if last_partial or state_name in ("final", "stable", "row", "lag", "dwell")
+                        else "listening"
+                    ),
                     partial=last_partial,
                     final=last_final,
                     seq=seq,

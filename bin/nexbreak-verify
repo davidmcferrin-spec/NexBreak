@@ -128,13 +128,17 @@ def _start_scte_watch(
         log_fh = open(log_path, "ab", buffering=0)
     except OSError:
         log_fh = subprocess.DEVNULL
+    child_env = os.environ.copy()
+    child_env.setdefault("NEXBREAK_RUN_DIR", os.environ.get("NEXBREAK_RUN_DIR", "/run/nexbreak"))
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             start_new_session=True,
+            env=child_env,
+            cwd=str(Path(script).resolve().parent),
         )
     except Exception as exc:  # noqa: BLE001
         if log_fh is not subprocess.DEVNULL:
@@ -149,15 +153,19 @@ def _start_scte_watch(
                 log_fh.close()
             except Exception:
                 pass
-    for _ in range(40):
+    log.info("spawned scte-watch pid=%s egress=%s log=%s", proc.pid, eid, log_path)
+    for _ in range(60):
         if watch_alive(eid):
+            break
+        # Child died before writing pid — surface quickly.
+        if proc.poll() is not None:
             break
         time.sleep(0.05)
     alive = watch_alive(eid)
     live = read_json(scte_state_path(eid)) or empty_scte_state(eid, listening=alive)
     if not alive:
         err = live.get("error") or (
-            f"scte-watch failed to start (see {log_path} if writable)"
+            f"scte-watch failed to start (exit={proc.poll()}; see {log_path})"
         )
         return {
             "ok": False,

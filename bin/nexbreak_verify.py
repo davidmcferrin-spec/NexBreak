@@ -149,7 +149,7 @@ def resolve_tap(
     }
 
 
-def stop_watch_pid(egress_id: int, *, timeout: float = 5.0) -> bool:
+def stop_watch_pid(egress_id: int, *, timeout: float = 3.0) -> bool:
     """Stop a watch process recorded in the pidfile. Returns True if stopped/absent."""
     pid_path = scte_pid_path(egress_id)
     try:
@@ -159,23 +159,31 @@ def stop_watch_pid(egress_id: int, *, timeout: float = 5.0) -> bool:
         pid = 0
     if pid > 0:
         try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pid = 0
+        except PermissionError:
+            return False
+    if pid > 0:
+        try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
-            pass
+            pid = 0
         except PermissionError:
             return False
         deadline = time.time() + timeout
-        while time.time() < deadline:
+        while pid > 0 and time.time() < deadline:
             try:
                 os.kill(pid, 0)
-                time.sleep(0.1)
+                time.sleep(0.05)
             except ProcessLookupError:
                 break
         else:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            if pid > 0:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
     try:
         pid_path.unlink(missing_ok=True)  # type: ignore[call-arg]
     except TypeError:
@@ -190,7 +198,6 @@ def stop_watch_pid(egress_id: int, *, timeout: float = 5.0) -> bool:
     try:
         atomic_write_json(scte_state_path(egress_id), state)
     except OSError:
-        # EROFS under ProtectSystem if RuntimeDirectory missing — pid stop still ok.
         pass
     return True
 

@@ -15,10 +15,14 @@ RuntimeDirectory=nexbreak
 RuntimeDirectoryMode=0770
 Environment=NEXBREAK_RUN_DIR=/run/nexbreak
 Environment=NEXBREAK_VERIFY_PORT=8788
+Environment=NEXBREAK_LOG_DIR=/var/log/nexbreak
 ReadWritePaths=/var/lib/nexbreak /var/log/nexbreak /run/nexbreak
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
+# Keep spawned scte-watch in this cgroup so stop/restart cleans it up.
+KillMode=control-group
+TimeoutStopSec=8
 LimitNOFILE=65536
 
 [Install]
