@@ -79,6 +79,13 @@ sudo ufw allow 8189 comment 'NexBreak WebRTC media'
 
 Set a real RTSP URL on Channels → Input 1, restart `nexbreak-proc@1`, open Preview.
 
+### Verify SCTE on the egress (return feed)
+
+Open **Verify**, pick an output, click **Listen**, then fire a splice from **Roll**.
+Listener SRT outputs are checked with a second local caller into our port; push
+egresses fall back to the routed post-splice local feed. Markers appear in the
+sightings table (and match recent audit commands when `event_id` aligns).
+
 ### Caption policy (per stream → SRT egress)
 
 | Policy | Behavior |

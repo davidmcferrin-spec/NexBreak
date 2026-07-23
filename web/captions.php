@@ -21,9 +21,15 @@ require __DIR__ . '/include/header.php';
     <strong>Force ASR</strong> — always insert ASR (re-encodes that channel to H.264+A53; replaces source CC).
     <strong>Off</strong> — no ASR; source CC still preserved on remux.
     Policy changes that flip preserve ↔ insert restart that channel’s pipeline only.
-    Preview page <em>CC</em> toggle is display-only overlay, not this policy.
+    Preview page <em>CC</em> toggle is a display-only overlay from ccextractor — not this ASR worker text.
   </p>
   <div id="cap-channels"><div class="empty">Loading…</div></div>
+</section>
+
+<section class="panel">
+  <h2>Vosk / ASR live</h2>
+  <p class="sub" style="margin-top:0">What the caption worker is doing right now (model load, audio tap, partial/final text).</p>
+  <div id="cap-asr-live"><div class="empty">Loading…</div></div>
 </section>
 
 <section class="two-col">

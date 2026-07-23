@@ -21,12 +21,17 @@ from subprocess import Popen
 from typing import Any, Optional
 
 from nexbreak_caption_policy import cue_sock_path, enabled_from_policy, normalize_policy
+from nexbreak_verify import asr_state_path, read_json
 
 log = logging.getLogger("nexbreak.captions")
 
 
 def worker_script() -> str:
     return str(Path(__file__).resolve().parent / "nexbreak-caption-worker")
+
+
+def read_asr_live(service_name: str) -> Optional[dict[str, Any]]:
+    return read_json(asr_state_path(str(service_name)))
 
 
 class CaptionSidecar:
@@ -49,6 +54,8 @@ class CaptionSidecar:
         return self._proc is not None and self._proc.poll() is None
 
     def status(self) -> dict[str, Any]:
+        svc = str(self.channel.get("service_name") or "x")
+        asr = read_asr_live(svc) or {}
         return {
             "desired": self._desired,
             "running": self.alive,
@@ -61,7 +68,8 @@ class CaptionSidecar:
                 self.channel.get("caption_policy"),
                 captioning_enabled=self.channel.get("captioning_enabled"),
             ),
-            "cue_sock": cue_sock_path(str(self.channel.get("service_name") or "x")),
+            "cue_sock": cue_sock_path(svc),
+            "asr": asr,
         }
 
     def set_enabled(self, enabled: bool) -> dict[str, Any]:

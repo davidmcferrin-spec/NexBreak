@@ -151,3 +151,20 @@ CREATE TABLE caption_blacklist (
     word                    TEXT NOT NULL UNIQUE,
     created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- SCTE-35 markers observed on a return-feed / post-splice tap (Verify page)
+CREATE TABLE scte_sightings (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    egress_channel_id       INTEGER REFERENCES egress_channels(id) ON DELETE SET NULL,
+    processing_channel_id   INTEGER REFERENCES processing_channels(id) ON DELETE SET NULL,
+    event_id                INTEGER,
+    splice_type             TEXT,
+    out_of_network          INTEGER,
+    verified                BOOLEAN NOT NULL DEFAULT 0,
+    source                  TEXT NOT NULL CHECK (source IN ('srt','feed')),
+    raw_snip                TEXT,
+    seen_at                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_scte_sightings_egress ON scte_sightings(egress_channel_id, seen_at);
+CREATE INDEX idx_scte_sightings_proc ON scte_sightings(processing_channel_id, seen_at);

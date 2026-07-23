@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""
+nexbreak-scte-watch — return-feed SCTE-35 monitor for one egress.
+
+Tap rule:
+  srt listener egress → srt://127.0.0.1:<port>?mode=caller
+  caller/rendezvous   → routed processing local MPEG-TS UDP feed
+
+Pipeline: ffmpeg (copy) | tsp -P tables --tid 0xFC → parse → JSON + SQLite.
+Spawned on-demand by nexbreak-controller (Verify page). Stdlib only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Any, Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from nexbreak_db import connect, migrate  # noqa: E402
+from nexbreak_verify import (  # noqa: E402
+    atomic_write_json,
+    empty_scte_state,
+    scte_pid_path,
+    scte_state_path,
+)
+
+log = logging.getLogger("nexbreak-scte-watch")
+_stop = False
+
+RECENT_MAX = 40
+SCTE_MARKER = "##scte##"
+
+
+def _handle(signum, _frame):
+    global _stop
+    log.info("signal %s — stopping", signum)
+    _stop = True
+
+
+def _proc_read_bytes(pid: int) -> int:
+    try:
+        with open(f"/proc/{pid}/io", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("read_bytes:"):
+                    return int(line.split()[1])
+    except Exception:
+        return 0
+    return 0
+
+
+def _local(tag: str) -> str:
+    if "}" in tag:
+        return tag.rsplit("}", 1)[-1]
+    return tag
+
+
+def parse_scte_xml(xml_text: str) -> Optional[dict[str, Any]]:
+    """Extract splice_insert / splice_null fields from a TSDuck XML blob."""
+    text = xml_text.strip()
+    if not text:
+        return None
+    # log-xml-line may prefix logger noise; keep from first '<'
+    if "<" in text:
+        text = text[text.index("<") :]
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        # Wrap fragment
+        try:
+            root = ET.fromstring(f"<wrap>{text}</wrap>")
+        except ET.ParseError:
+            return None
+
+    insert = None
+    for el in root.iter():
+        name = _local(el.tag).lower()
+        if name in ("splice_insert", "spliceinsert"):
+            insert = el
+            break
+    if insert is None:
+        # Still record that we saw a splice_information_table
+        for el in root.iter():
+            if _local(el.tag).lower() in (
+                "splice_information_table",
+                "spliceinformationtable",
+            ):
+                return {
+                    "event_id": None,
+                    "out_of_network": None,
+                    "cancel": None,
+                    "splice_type": "splice_information",
+                    "raw_snip": text[:240],
+                }
+        return None
+
+    attrs = {k.lower().replace("-", "_"): v for k, v in insert.attrib.items()}
+    # TSDuck uses both styles
+    eid = attrs.get("splice_event_id") or attrs.get("event_id")
+    try:
+        event_id = int(eid) if eid is not None else None
+    except ValueError:
+        event_id = None
+
+    cancel_raw = attrs.get("splice_event_cancel") or attrs.get("splice_event_cancel_indicator")
+    cancel = str(cancel_raw).lower() in ("true", "1", "yes") if cancel_raw is not None else False
+
+    oon_raw = attrs.get("out_of_network") or attrs.get("out_of_network_indicator")
+    if oon_raw is None:
+        out_of_network = None
+    else:
+        out_of_network = str(oon_raw).lower() in ("true", "1", "yes")
+
+    if cancel:
+        splice_type = "splice_cancel"
+    elif out_of_network is True:
+        splice_type = "splice_start"
+    elif out_of_network is False:
+        splice_type = "splice_end"
+    else:
+        splice_type = "splice_insert"
+
+    return {
+        "event_id": event_id,
+        "out_of_network": out_of_network,
+        "cancel": cancel,
+        "splice_type": splice_type,
+        "raw_snip": text[:240],
+    }
+
+
+def correlate_audit(
+    conn,
+    *,
+    processing_channel_id: Optional[int],
+    event_id: Optional[int],
+    window_s: float,
+) -> bool:
+    if processing_channel_id is None or event_id is None:
+        return False
+    row = conn.execute(
+        """
+        SELECT id, detail, splice_type, occurred_at
+        FROM audit_events
+        WHERE event_type = 'splice_command'
+          AND result = 'success'
+          AND processing_channel_id = ?
+          AND occurred_at >= datetime('now', ?)
+        ORDER BY id DESC
+        LIMIT 20
+        """,
+        (processing_channel_id, f"-{int(max(5, window_s))} seconds"),
+    ).fetchall()
+    needle = f"event_id={int(event_id)}"
+    for r in row:
+        detail = r["detail"] or ""
+        if needle in detail:
+            return True
+    return False
+
+
+def insert_sighting(
+    conn,
+    *,
+    egress_id: int,
+    processing_channel_id: Optional[int],
+    tap_kind: str,
+    parsed: dict[str, Any],
+    verified: bool,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO scte_sightings (
+            egress_channel_id, processing_channel_id, event_id,
+            splice_type, out_of_network, verified, source, raw_snip
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            egress_id,
+            processing_channel_id,
+            parsed.get("event_id"),
+            parsed.get("splice_type"),
+            (
+                None
+                if parsed.get("out_of_network") is None
+                else (1 if parsed.get("out_of_network") else 0)
+            ),
+            1 if verified else 0,
+            tap_kind,
+            parsed.get("raw_snip"),
+        ),
+    )
+    conn.commit()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="NexBreak SCTE return-feed watch")
+    parser.add_argument("--egress-id", type=int, required=True)
+    parser.add_argument("--tap-url", required=True)
+    parser.add_argument("--tap-kind", choices=("srt", "feed"), required=True)
+    parser.add_argument("--label", default="")
+    parser.add_argument("--processing-channel-id", type=int, default=0)
+    parser.add_argument("--delay-ms", type=int, default=2000)
+    parser.add_argument("--db", default=None)
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+    signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGTERM, _handle)
+
+    eid = int(args.egress_id)
+    pid_path = scte_pid_path(eid)
+    state_path = scte_state_path(eid)
+    pid_path.write_text(str(os.getpid()) + "\n", encoding="utf-8")
+
+    ffmpeg = shutil.which("ffmpeg") or os.environ.get("NEXBREAK_FFMPEG", "ffmpeg")
+    tsp = shutil.which("tsp") or os.environ.get("NEXBREAK_TSP", "tsp")
+    if not shutil.which("ffmpeg") and not Path(str(ffmpeg)).is_file():
+        log.error("ffmpeg not found")
+        return 1
+    if not shutil.which("tsp") and not Path(str(tsp)).is_file():
+        log.error("tsp not found")
+        return 1
+
+    state = empty_scte_state(
+        eid,
+        listening=True,
+        source=args.label or args.tap_url,
+        tap_kind=args.tap_kind,
+        tap_url=args.tap_url,
+    )
+    atomic_write_json(state_path, state)
+
+    conn = None
+    if args.db:
+        try:
+            conn = connect(args.db)
+            migrate(conn)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("DB unavailable for sightings: %s", exc)
+            conn = None
+
+    ff_argv = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-fflags",
+        "+genpts+discardcorrupt+nobuffer",
+        "-i",
+        args.tap_url,
+        "-map",
+        "0",
+        "-c",
+        "copy",
+        "-f",
+        "mpegts",
+        "pipe:1",
+    ]
+    # Prefer log-xml-line (one XML blob per section on stderr via tsp logger).
+    tsp_argv = [
+        tsp,
+        "-I",
+        "file",
+        "-",
+        "-P",
+        "tables",
+        "--tid",
+        "0xFC",
+        f"--log-xml-line={SCTE_MARKER}",
+        "-O",
+        "drop",
+    ]
+
+    log.info("watch egress=%s kind=%s url=%s", eid, args.tap_kind, args.tap_url)
+    ff = subprocess.Popen(
+        ff_argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    tsp_proc = subprocess.Popen(
+        tsp_argv,
+        stdin=ff.stdout,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    if ff.stdout is not None:
+        ff.stdout.close()
+
+    recent: list[dict[str, Any]] = []
+    lock = threading.Lock()
+    window_s = max(10.0, args.delay_ms / 1000.0 + 5.0)
+
+    def bump_state(**kwargs: Any) -> None:
+        with lock:
+            state.update(kwargs)
+            state["updated_at"] = time.time()
+            state["recent"] = list(recent)
+            atomic_write_json(state_path, state)
+
+    def on_scte(xml_blob: str) -> None:
+        parsed = parse_scte_xml(xml_blob)
+        if not parsed:
+            return
+        now = time.time()
+        verified = False
+        if conn is not None:
+            try:
+                verified = correlate_audit(
+                    conn,
+                    processing_channel_id=args.processing_channel_id or None,
+                    event_id=parsed.get("event_id"),
+                    window_s=window_s,
+                )
+                insert_sighting(
+                    conn,
+                    egress_id=eid,
+                    processing_channel_id=args.processing_channel_id or None,
+                    tap_kind=args.tap_kind,
+                    parsed=parsed,
+                    verified=verified,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("sighting persist failed: %s", exc)
+
+        entry = {
+            "ts": now,
+            "event_id": parsed.get("event_id"),
+            "splice_type": parsed.get("splice_type"),
+            "out_of_network": parsed.get("out_of_network"),
+            "cancel": parsed.get("cancel"),
+            "verified": verified,
+            "raw_snip": parsed.get("raw_snip"),
+        }
+        with lock:
+            recent.insert(0, entry)
+            del recent[RECENT_MAX:]
+        bump_state(
+            last_scte_at=now,
+            last_event_id=parsed.get("event_id"),
+            out_of_network=parsed.get("out_of_network"),
+            locked=True,
+        )
+        log.info(
+            "SCTE seen egress=%s event_id=%s type=%s verified=%s",
+            eid,
+            parsed.get("event_id"),
+            parsed.get("splice_type"),
+            verified,
+        )
+
+    def reader() -> None:
+        assert tsp_proc.stderr is not None
+        buf = ""
+        for line in tsp_proc.stderr:
+            if _stop:
+                break
+            if SCTE_MARKER not in line:
+                continue
+            # Format: ... ##scte## <?xml ...>  or remainder of multi-line
+            idx = line.find(SCTE_MARKER)
+            chunk = line[idx + len(SCTE_MARKER) :].strip()
+            if chunk.startswith("<"):
+                on_scte(chunk)
+            else:
+                buf += chunk
+                if "</" in buf and ">" in buf:
+                    on_scte(buf)
+                    buf = ""
+
+    t = threading.Thread(target=reader, name="scte-stderr", daemon=True)
+    t.start()
+
+    try:
+        while not _stop:
+            if ff.poll() is not None or tsp_proc.poll() is not None:
+                err = (
+                    f"ffmpeg exited {ff.returncode}"
+                    if ff.poll() is not None
+                    else f"tsp exited {tsp_proc.returncode}"
+                )
+                bump_state(listening=True, locked=False, error=err)
+                log.error("%s — exiting watch", err)
+                break
+            nbytes = _proc_read_bytes(ff.pid)
+            locked = nbytes > 0 or state.get("last_scte_at") is not None
+            bump_state(
+                listening=True,
+                bytes_seen=nbytes,
+                last_byte_at=time.time() if nbytes else state.get("last_byte_at"),
+                locked=bool(locked),
+                error=None,
+            )
+            time.sleep(1.0)
+    finally:
+        _stop = True
+        for p in (tsp_proc, ff):
+            if p.poll() is None:
+                p.terminate()
+        deadline = time.time() + 3
+        for p in (tsp_proc, ff):
+            if p.poll() is None:
+                try:
+                    p.wait(timeout=max(0.1, deadline - time.time()))
+                except Exception:
+                    p.kill()
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        bump_state(listening=False, locked=False)
+        try:
+            pid_path.unlink()
+        except OSError:
+            pass
+        log.info("watch exit egress=%s", eid)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

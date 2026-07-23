@@ -18,6 +18,7 @@ $nav = [
     'channels' => ['href' => '/channels.php', 'label' => 'Channels'],
     'router' => ['href' => '/router.php', 'label' => 'Router'],
     'captions' => ['href' => '/captions.php', 'label' => 'Captions'],
+    'verify' => ['href' => '/verify.php', 'label' => 'Verify'],
     'services' => ['href' => '/services.php', 'label' => 'Services'],
     'metrics' => ['href' => '/metrics.php', 'label' => 'Metrics'],
     'audit' => ['href' => '/audit.php', 'label' => 'Audit'],

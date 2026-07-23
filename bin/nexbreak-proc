@@ -436,6 +436,14 @@ def _caption_runtime() -> dict[str, Any]:
         if _captions
         else {"desired": False, "running": False, "bypassed": True}
     )
+    # Always attach latest ASR snapshot (even if sidecar briefly down).
+    if "asr" not in cap and _channel:
+        try:
+            from nexbreak_captions import read_asr_live
+
+            cap["asr"] = read_asr_live(str(_channel.get("service_name") or "")) or {}
+        except Exception:
+            cap["asr"] = {}
     return {
         "ok": True,
         **cap,

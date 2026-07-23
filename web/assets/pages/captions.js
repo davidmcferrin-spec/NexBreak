@@ -1,6 +1,9 @@
 "use strict";
 (function () {
   var api = window.NexBreakAPI;
+  var channelsCache = [];
+  var statusById = {};
+  var asrPoll = null;
 
   var POLICIES = [
     { value: "auto", label: "Auto" },
@@ -14,16 +17,16 @@
     return Number(ch.captioning_enabled) ? "auto" : "off";
   }
 
-  function renderTable(channels, statusById) {
+  function renderTable(channels, statusMap) {
     var el = document.getElementById("cap-channels");
-    statusById = statusById || {};
+    statusMap = statusMap || {};
     el.innerHTML =
       '<table class="data"><thead><tr>' +
       "<th>Channel</th><th>Policy</th><th>Effective</th><th>Source CC</th><th>ASR</th><th></th>" +
       "</tr></thead><tbody>" +
       channels
         .map(function (ch) {
-          var data = statusById[ch.id] || null;
+          var data = statusMap[ch.id] || null;
           var rt = (data && data.runtime) || {};
           var policy = policyOf(ch, data);
           var effective = rt.effective_mode || "—";
@@ -91,22 +94,56 @@
     });
   }
 
-  async function loadChannels() {
-    var el = document.getElementById("cap-channels");
-    var res = await api.get("/v1/processing");
-    if (!res.ok || !res.data) {
-      el.innerHTML = '<div class="empty">Controller unreachable</div>';
-      return;
-    }
-    var channels = res.data.channels || [];
+  function renderAsrLive(channels, statusMap) {
+    var el = document.getElementById("cap-asr-live");
+    if (!el) return;
     if (!channels.length) {
       el.innerHTML = '<div class="empty">No processing channels</div>';
       return;
     }
+    el.innerHTML =
+      '<table class="data"><thead><tr>' +
+      "<th>Channel</th><th>Vosk</th><th>State</th><th>Tap</th><th>Cue sock</th><th>Partial</th><th>Last final</th>" +
+      "</tr></thead><tbody>" +
+      channels
+        .map(function (ch) {
+          var data = statusMap[ch.id] || {};
+          var rt = data.runtime || {};
+          var asr = rt.asr || {};
+          var vosk = asr.vosk_loaded
+            ? '<span class="badge ok">loaded</span>'
+            : '<span class="badge dim">bypass</span>';
+          var reason = asr.reason ? ' <span class="muted">' + api.esc(String(asr.reason).slice(0, 60)) + "</span>" : "";
+          var tap = asr.audio_tap_alive
+            ? '<span class="badge ok">alive</span>'
+            : '<span class="badge dim">—</span>';
+          var cue = asr.cue_connected
+            ? '<span class="badge ok">up</span>'
+            : '<span class="badge dim">down</span>';
+          return (
+            "<tr><td><strong>" +
+            api.esc(ch.name) +
+            "</strong></td><td>" +
+            vosk +
+            reason +
+            "</td><td>" +
+            api.esc(String(asr.state || "—")) +
+            "</td><td>" +
+            tap +
+            "</td><td>" +
+            cue +
+            "</td><td class=\"muted\">" +
+            api.esc(String(asr.partial || "")) +
+            "</td><td>" +
+            api.esc(String(asr.final || "")) +
+            "</td></tr>"
+          );
+        })
+        .join("") +
+      "</tbody></table>";
+  }
 
-    // First paint from DB (fast); enrich runtime in background.
-    renderTable(channels, {});
-
+  async function enrichStatuses(channels) {
     var statuses = await Promise.all(
       channels.map(function (c) {
         return api.get("/v1/processing/" + c.id + "/captioning").then(function (r) {
@@ -118,7 +155,40 @@
     statuses.forEach(function (s) {
       byId[s.id] = s.data;
     });
+    statusById = byId;
+    return byId;
+  }
+
+  async function loadChannels() {
+    var el = document.getElementById("cap-channels");
+    var res = await api.get("/v1/processing");
+    if (!res.ok || !res.data) {
+      el.innerHTML = '<div class="empty">Controller unreachable</div>';
+      return;
+    }
+    var channels = res.data.channels || [];
+    channelsCache = channels;
+    if (!channels.length) {
+      el.innerHTML = '<div class="empty">No processing channels</div>';
+      renderAsrLive([], {});
+      return;
+    }
+
+    renderTable(channels, {});
+    renderAsrLive(channels, {});
+
+    var byId = await enrichStatuses(channels);
     renderTable(channels, byId);
+    renderAsrLive(channels, byId);
+  }
+
+  function startAsrPoll() {
+    if (asrPoll) clearInterval(asrPoll);
+    asrPoll = setInterval(async function () {
+      if (!channelsCache.length) return;
+      var byId = await enrichStatuses(channelsCache);
+      renderAsrLive(channelsCache, byId);
+    }, 1000);
   }
 
   async function loadLex() {
@@ -218,6 +288,7 @@
 
   document.getElementById("btn-refresh-channels").addEventListener("click", loadChannels);
   loadChannels();
+  startAsrPoll();
   loadLex();
   loadBl();
 })();

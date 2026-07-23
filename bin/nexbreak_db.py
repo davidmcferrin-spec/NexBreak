@@ -102,6 +102,34 @@ def migrate(conn: sqlite3.Connection) -> None:
         )
         conn.commit()
 
+    # SCTE return-feed sightings (Verify page)
+    tables = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "scte_sightings" not in tables:
+        conn.executescript(
+            """
+            CREATE TABLE scte_sightings (
+                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                egress_channel_id       INTEGER REFERENCES egress_channels(id) ON DELETE SET NULL,
+                processing_channel_id   INTEGER REFERENCES processing_channels(id) ON DELETE SET NULL,
+                event_id                INTEGER,
+                splice_type             TEXT,
+                out_of_network          INTEGER,
+                verified                BOOLEAN NOT NULL DEFAULT 0,
+                source                  TEXT NOT NULL CHECK (source IN ('srt','feed')),
+                raw_snip                TEXT,
+                seen_at                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX idx_scte_sightings_egress ON scte_sightings(egress_channel_id, seen_at);
+            CREATE INDEX idx_scte_sightings_proc ON scte_sightings(processing_channel_id, seen_at);
+            """
+        )
+        conn.commit()
+
 
 def splice_udp_port_for(channel: dict[str, Any]) -> int:
     """Loopback UDP port for tsp spliceinject; default local_feed_port + 1000."""

@@ -31,9 +31,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from nexbreak_caption_policy import cue_sock_path  # noqa: E402
 from nexbreak_db import connect, migrate  # noqa: E402
 from nexbreak_pipeline import udp_mpegts_input_url  # noqa: E402
+from nexbreak_verify import asr_state_path, atomic_write_json  # noqa: E402
 
 log = logging.getLogger("nexbreak-caption-worker")
 _stop = False
+
+
+def write_asr_state(service_name: str, **fields) -> None:
+    path = asr_state_path(str(service_name))
+    payload = {
+        "service_name": str(service_name),
+        "ts": time.time(),
+    }
+    payload.update(fields)
+    try:
+        atomic_write_json(path, payload)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("asr state write failed: %s", exc)
 
 
 def _handle(signum, _frame):
@@ -178,6 +192,20 @@ def main() -> int:
 
     cue = connect_cues(sock_path)
     seq = 0
+    model_path = (args.model or "").strip()
+
+    write_asr_state(
+        args.service_name,
+        vosk_loaded=model is not None,
+        model=model_path,
+        reason=reason,
+        cue_connected=cue is not None,
+        state="idle_bypass" if model is None else "starting",
+        partial="",
+        final="",
+        seq=0,
+        audio_tap_alive=False,
+    )
 
     if model is None:
         # Stay alive; send periodic clears so inject does not stall on stale text.
@@ -186,12 +214,36 @@ def main() -> int:
                 cue = connect_cues(sock_path, retries=8)
             seq += 1
             cue = send_cue(cue, text="", clear=True, seq=seq)
+            write_asr_state(
+                args.service_name,
+                vosk_loaded=False,
+                model=model_path,
+                reason=reason,
+                cue_connected=cue is not None,
+                state="idle_bypass",
+                partial="",
+                final="",
+                seq=seq,
+                audio_tap_alive=False,
+            )
             time.sleep(2.0)
         if cue:
             try:
                 cue.close()
             except OSError:
                 pass
+        write_asr_state(
+            args.service_name,
+            vosk_loaded=False,
+            model=model_path,
+            reason=reason,
+            cue_connected=False,
+            state="stopped",
+            partial="",
+            final="",
+            seq=seq,
+            audio_tap_alive=False,
+        )
         return 0
 
     from vosk import KaldiRecognizer  # type: ignore
@@ -211,11 +263,37 @@ def main() -> int:
     )
     assert tap.stdout is not None
     last_partial = ""
+    last_final = ""
     last_final_at = time.time()
+    last_state_write = 0.0
+    write_asr_state(
+        args.service_name,
+        vosk_loaded=True,
+        model=model_path,
+        reason=reason,
+        cue_connected=cue is not None,
+        state="listening",
+        partial="",
+        final="",
+        seq=0,
+        audio_tap_alive=True,
+    )
     try:
         while not _stop:
             if tap.poll() is not None:
                 log.warning("audio tap exited %s — restarting in 2s", tap.returncode)
+                write_asr_state(
+                    args.service_name,
+                    vosk_loaded=True,
+                    model=model_path,
+                    reason=reason,
+                    cue_connected=cue is not None,
+                    state="tap_restart",
+                    partial=last_partial,
+                    final=last_final,
+                    seq=seq,
+                    audio_tap_alive=False,
+                )
                 time.sleep(2.0)
                 if _stop:
                     break
@@ -235,6 +313,7 @@ def main() -> int:
             if cue is None:
                 cue = connect_cues(sock_path, retries=4)
 
+            state_name = "listening"
             if rec.AcceptWaveform(data):
                 try:
                     result = json.loads(rec.Result())
@@ -242,6 +321,9 @@ def main() -> int:
                     result = {}
                 text = apply_text(str(result.get("text") or ""), blacklist, lexicon)
                 last_partial = ""
+                if text:
+                    last_final = text
+                    state_name = "final"
                 last_final_at = time.time()
                 seq += 1
                 cue = send_cue(cue, text=text, clear=not text, seq=seq)
@@ -253,12 +335,29 @@ def main() -> int:
                 ptext = apply_text(str(partial.get("partial") or ""), blacklist, lexicon)
                 if ptext and ptext != last_partial:
                     last_partial = ptext
+                    state_name = "partial"
                     seq += 1
                     cue = send_cue(cue, text=ptext, clear=False, seq=seq)
                 elif last_partial and (time.time() - last_final_at) > 8.0:
                     last_partial = ""
                     seq += 1
                     cue = send_cue(cue, text="", clear=True, seq=seq)
+
+            now = time.time()
+            if state_name in ("partial", "final") or (now - last_state_write) >= 1.0:
+                last_state_write = now
+                write_asr_state(
+                    args.service_name,
+                    vosk_loaded=True,
+                    model=model_path,
+                    reason=reason,
+                    cue_connected=cue is not None,
+                    state=state_name if last_partial or state_name == "final" else "listening",
+                    partial=last_partial,
+                    final=last_final,
+                    seq=seq,
+                    audio_tap_alive=tap.poll() is None,
+                )
     finally:
         if tap.poll() is None:
             tap.terminate()
@@ -274,6 +373,18 @@ def main() -> int:
             except OSError:
                 pass
         del model
+        write_asr_state(
+            args.service_name,
+            vosk_loaded=False,
+            model=model_path,
+            reason="unloaded",
+            cue_connected=False,
+            state="stopped",
+            partial="",
+            final=last_final,
+            seq=seq,
+            audio_tap_alive=False,
+        )
         log.info("caption worker exit (vosk unloaded)")
     return 0
 
