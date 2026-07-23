@@ -3,7 +3,9 @@
 Pipeline builders for nexbreak-proc / nexbreak-egress.
 
 ffmpeg remux/transcode → tsp (PMT + spliceinject) → UDP local feed
-egress: UDP local feed → SRT (ffmpeg libsrt) or HLS (deferred).
+egress: UDP local feed → SRT via tsp (packet-faithful; preserves SCTE-35)
+  or ffmpeg libsrt when NEXBREAK_EGRESS_ENGINE=ffmpeg (may drop 0x86 PIDs).
+HLS deferred.
 
 Loopback feeds are rewritten to multicast (239.255.98.1 by default) so
 multiple local readers each get a full packet copy.
@@ -392,7 +394,13 @@ def ffmpeg_egress_argv(
     feed_port: int,
     egress: dict[str, Any],
 ) -> list[str]:
-    """Pull local MPEG-TS UDP feed and push SRT (copy). HLS deferred."""
+    """
+    Pull local MPEG-TS UDP feed and push SRT (copy). HLS deferred.
+
+    Prefer tsp_egress_argv for production: ffmpeg demux/remux often drops
+    SCTE-35 (stream_type 0x86) private data PIDs even with -map 0 -c copy.
+    Kept for NEXBREAK_EGRESS_ENGINE=ffmpeg fallback / dry-run comparison.
+    """
     if egress["output_type"] != "srt":
         raise ValueError(f"egress output_type={egress['output_type']} not implemented yet (v1 = srt)")
 
@@ -416,6 +424,61 @@ def ffmpeg_egress_argv(
         "-mpegts_flags", "+resend_headers",
         dst,
     ]
+
+
+def tsp_egress_argv(
+    *,
+    tsp: str,
+    feed_host: str,
+    feed_port: int,
+    egress: dict[str, Any],
+) -> list[str]:
+    """
+    Packet-faithful local feed → SRT via TSDuck (preserves SCTE-35 PIDs).
+
+    Listener uses --multiple so sequential clients can reconnect without
+    restarting tsp; caller/rendezvous exit when the peer drops (egress
+    service restarts them).
+    """
+    if egress["output_type"] != "srt":
+        raise ValueError(f"egress output_type={egress['output_type']} not implemented yet (v1 = srt)")
+
+    mode = (egress.get("srt_mode") or "listener").lower()
+    latency_ms = int(os.environ.get("NEXBREAK_SRT_LATENCY_MS", "800"))
+    dest = resolve_local_feed_host(feed_host)
+    argv = [
+        tsp,
+        "-I", "ip", f"{dest}:{int(feed_port)}",
+        "--local-address", "127.0.0.1",
+        "-O", "srt",
+        "--latency", str(latency_ms),
+        "--transtype", "live",
+    ]
+    if mode == "listener":
+        port = egress.get("srt_listen_port")
+        if not port:
+            raise ValueError("srt_listen_port required for SRT listener egress")
+        argv += ["--listener", f":{int(port)}", "--multiple"]
+    elif mode == "rendezvous":
+        host = egress.get("srt_remote_host")
+        port = egress.get("srt_remote_port")
+        if not host or not port:
+            raise ValueError("srt_remote_host/port required for SRT rendezvous egress")
+        # Rendezvous = both ends specify local+remote (TSDuck: --listener + --caller).
+        argv += ["--listener", f":{int(port)}", "--caller", f"{host}:{int(port)}"]
+    else:
+        host = egress.get("srt_remote_host")
+        port = egress.get("srt_remote_port")
+        if not host or not port:
+            raise ValueError("srt_remote_host/port required for SRT caller egress")
+        argv += ["--caller", f"{host}:{int(port)}"]
+    return argv
+
+
+def egress_engine() -> str:
+    """Return 'tsp' (default) or 'ffmpeg' from NEXBREAK_EGRESS_ENGINE."""
+    raw = (os.environ.get("NEXBREAK_EGRESS_ENGINE") or "tsp").strip().lower()
+    return "ffmpeg" if raw == "ffmpeg" else "tsp"
 
 
 def scte35_xml(

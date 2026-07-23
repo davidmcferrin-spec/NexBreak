@@ -49,6 +49,22 @@ def db():
     return connect(DB_PATH)
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """Parse bools from JSON (bool/int) or query strings ("false", "0", …)."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    s = str(value).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
 def _resolve_splice_request(
     conn, body: dict[str, Any]
 ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]], Optional[str]]:
@@ -105,9 +121,11 @@ def _resolve_splice_request(
         fire = {
             "splice_type": splice_type,
             "hex_payload": body.get("hex_payload"),
-            "auto_return": bool(body.get("auto_return")),
+            "auto_return": _as_bool(body.get("auto_return"), False),
             "break_duration_sec": float(br) if br not in (None, "") else None,
-            "use_channel_delay": bool(body.get("use_channel_delay", True)),
+            "use_channel_delay": _as_bool(
+                body.get("use_channel_delay", True), True
+            ),
             "preset": None,
         }
     return channel, fire, None

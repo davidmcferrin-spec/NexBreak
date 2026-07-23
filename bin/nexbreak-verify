@@ -32,6 +32,7 @@ from nexbreak_db import (  # noqa: E402
 )
 from nexbreak_verify import (  # noqa: E402
     empty_scte_state,
+    probe_scte_feed,
     read_json,
     resolve_tap,
     scte_dir,
@@ -119,6 +120,11 @@ def _start_scte_watch(
         "--delay-ms",
         str(delay_ms),
     ]
+    if tap.get("tap_kind") == "feed":
+        if tap.get("feed_host"):
+            argv += ["--feed-host", str(tap["feed_host"])]
+        if tap.get("feed_port"):
+            argv += ["--feed-port", str(int(tap["feed_port"]))]
     if processing:
         argv += ["--processing-channel-id", str(processing["id"])]
     if DB_PATH:
@@ -348,6 +354,79 @@ class Handler(BaseHTTPRequestHandler):
                         "listening": False,
                         "live": read_json(scte_state_path(eid))
                         or empty_scte_state(eid),
+                    },
+                )
+                return
+
+            if path.startswith("/v1/verify/") and path.endswith("/probe"):
+                eid = int(path.split("/")[3])
+                row = conn.execute(
+                    "SELECT * FROM egress_channels WHERE id = ?", (eid,)
+                ).fetchone()
+                if not row:
+                    self._send(404, {"ok": False, "error": "egress not found"})
+                    return
+                eg = row_to_dict(row)
+                assert eg is not None
+                proc = _routed_processing(conn, eid)
+                tap = resolve_tap(eg, proc)
+                if not tap.get("ok") or tap.get("tap_kind") != "feed":
+                    self._send(
+                        400,
+                        {
+                            "ok": False,
+                            "error": (
+                                tap.get("error")
+                                or "probe needs a routed post-splice feed tap"
+                            ),
+                            "tap": tap,
+                        },
+                    )
+                    return
+                duration = 8.0
+                if isinstance(_body, dict) and _body.get("duration_s") is not None:
+                    try:
+                        duration = float(_body["duration_s"])
+                    except (TypeError, ValueError):
+                        duration = 8.0
+                scte_pid = None
+                if proc:
+                    try:
+                        scte_pid = int(proc.get("scte35_pid") or 500)
+                    except (TypeError, ValueError):
+                        scte_pid = 500
+                result = probe_scte_feed(
+                    str(tap["feed_host"]),
+                    int(tap["feed_port"]),
+                    duration_s=duration,
+                    scte_pid=scte_pid,
+                )
+                audit(
+                    conn,
+                    event_type="config_change",
+                    egress_channel_id=eid,
+                    processing_channel_id=proc["id"] if proc else None,
+                    source_ip=self.client_address[0],
+                    result="success" if result.get("ok") else "failure",
+                    detail=(
+                        f"scte probe verdict={result.get('verdict')} "
+                        f"sections={result.get('section_count')} "
+                        f"pmt={result.get('pmt_scte_pids')}"
+                    ),
+                )
+                status = 200 if result.get("ok") else 502
+                self._send(
+                    status,
+                    {
+                        **result,
+                        "egress_id": eid,
+                        "tap": tap,
+                        "inject_note": (
+                            "Recent injects (audit) only prove the controller "
+                            "accepted the command. This probe reads the "
+                            "post-splice MPEG-TS feed with TSDuck — same path "
+                            "Listen uses after the ffmpeg remux drop fix."
+                        ),
                     },
                 )
                 return

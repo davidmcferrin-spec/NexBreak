@@ -6,8 +6,14 @@ Tap rule (see nexbreak_verify.resolve_tap):
   Prefer routed post-splice local MPEG-TS feed (reliable; no SRT client fight).
   Fall back to srt://127.0.0.1:<port>?mode=caller when no processing is routed.
 
-Pipeline: ffmpeg (copy) | pump(count bytes) | tsp -P tables --tid 0xFC
-  → parse → JSON state + SQLite sightings.
+Pipeline (feed tap — preferred):
+  tsp -I ip … -P tables --tid 0xFC -P count -O drop
+  Direct TSDuck IP input preserves SCTE-35 (stream_type 0x86). Do NOT remux
+  through ffmpeg first: ffmpeg -map 0 -c copy typically drops private data PIDs
+  and produces false "no SCTE" results even when inject is working.
+
+Pipeline (SRT return tap — fallback only):
+  tsp -I srt --caller … (same tables plugin), else ffmpeg|tsp as last resort.
 
 Spawned on-demand by nexbreak-verify (Verify page). Stdlib only.
 """
@@ -17,6 +23,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -26,10 +33,12 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Callable, Optional
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nexbreak_db import connect, migrate  # noqa: E402
+from nexbreak_pipeline import resolve_local_feed_host  # noqa: E402
 from nexbreak_verify import (  # noqa: E402
     atomic_write_json,
     empty_scte_state,
@@ -84,7 +93,7 @@ def _pump_bytes(
     *,
     stop_flag: Callable[[], bool],
 ) -> None:
-    """Copy MPEG-TS ffmpeg→tsp while counting bytes (UDP does not bump /proc io)."""
+    """Copy MPEG-TS ffmpeg→tsp while counting bytes (legacy SRT fallback)."""
     try:
         while not stop_flag():
             chunk = src.read(65536)
@@ -244,12 +253,80 @@ def insert_sighting(
     conn.commit()
 
 
+def _parse_srt_caller(url: str) -> Optional[str]:
+    """Return host:port for tsp -I srt --caller from an srt:// URL."""
+    u = urlparse(url)
+    if (u.scheme or "").lower() != "srt":
+        return None
+    host = u.hostname or "127.0.0.1"
+    port = u.port
+    if not port:
+        return None
+    return f"{host}:{int(port)}"
+
+
+def build_tsp_feed_argv(
+    tsp: str,
+    *,
+    feed_host: str,
+    feed_port: int,
+) -> list[str]:
+    dest = resolve_local_feed_host(feed_host)
+    return [
+        tsp,
+        "-I",
+        "ip",
+        f"{dest}:{int(feed_port)}",
+        "--local-address",
+        "127.0.0.1",
+        "-P",
+        "tables",
+        "--tid",
+        "0xFC",
+        f"--log-xml-line={SCTE_MARKER}",
+        "-P",
+        "count",
+        "--interval",
+        "2",
+        "-O",
+        "drop",
+    ]
+
+
+def build_tsp_srt_argv(tsp: str, *, caller: str) -> list[str]:
+    latency_ms = int(os.environ.get("NEXBREAK_SRT_LATENCY_MS", "800"))
+    return [
+        tsp,
+        "-I",
+        "srt",
+        "--caller",
+        caller,
+        "--latency",
+        str(latency_ms),
+        "--transtype",
+        "live",
+        "-P",
+        "tables",
+        "--tid",
+        "0xFC",
+        f"--log-xml-line={SCTE_MARKER}",
+        "-P",
+        "count",
+        "--interval",
+        "2",
+        "-O",
+        "drop",
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="NexBreak SCTE return-feed watch")
     parser.add_argument("--egress-id", type=int, required=True)
     parser.add_argument("--tap-url", required=True)
     parser.add_argument("--tap-kind", choices=("srt", "feed"), required=True)
     parser.add_argument("--label", default="")
+    parser.add_argument("--feed-host", default="")
+    parser.add_argument("--feed-port", type=int, default=0)
     parser.add_argument("--processing-channel-id", type=int, default=0)
     parser.add_argument("--delay-ms", type=int, default=2000)
     parser.add_argument("--db", default=None)
@@ -278,9 +355,6 @@ def main() -> int:
 
     ffmpeg = shutil.which("ffmpeg") or os.environ.get("NEXBREAK_FFMPEG", "ffmpeg")
     tsp = shutil.which("tsp") or os.environ.get("NEXBREAK_TSP", "tsp")
-    if not shutil.which("ffmpeg") and not Path(str(ffmpeg)).is_file():
-        log.error("ffmpeg not found")
-        return 1
     if not shutil.which("tsp") and not Path(str(tsp)).is_file():
         log.error("tsp not found")
         return 1
@@ -291,6 +365,7 @@ def main() -> int:
         source=args.label or args.tap_url,
         tap_kind=args.tap_kind,
         tap_url=args.tap_url,
+        engine=None,
     )
     atomic_write_json(state_path, state)
 
@@ -302,38 +377,6 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             log.warning("DB unavailable for sightings: %s", exc)
             conn = None
-
-    ff_argv = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        "-nostdin",
-        "-fflags",
-        "+genpts+discardcorrupt+nobuffer",
-        "-i",
-        args.tap_url,
-        "-map",
-        "0",
-        "-c",
-        "copy",
-        "-f",
-        "mpegts",
-        "pipe:1",
-    ]
-    tsp_argv = [
-        tsp,
-        "-I",
-        "file",
-        "-",
-        "-P",
-        "tables",
-        "--tid",
-        "0xFC",
-        f"--log-xml-line={SCTE_MARKER}",
-        "-O",
-        "drop",
-    ]
 
     recent: list[dict[str, Any]] = []
     lock = threading.Lock()
@@ -405,52 +448,139 @@ def main() -> int:
         )
 
     def read_tsp_stderr(stream) -> None:
-        buf = ""
         try:
             while not _stop:
                 raw = stream.readline()
                 if not raw:
                     break
                 line = raw.decode("utf-8", errors="replace")
+                # count plugin: "… after N packets …"
+                m = re.search(r"(\d[\d,]*)\s+packets?", line, re.I)
+                if m:
+                    try:
+                        n = int(m.group(1).replace(",", ""))
+                        byte_counter[0] = max(byte_counter[0], n * 188)
+                    except ValueError:
+                        pass
                 if SCTE_MARKER not in line:
                     continue
                 idx = line.find(SCTE_MARKER)
                 chunk = line[idx + len(SCTE_MARKER) :].strip()
                 if chunk.startswith("<"):
                     on_scte(chunk)
-                else:
-                    buf += chunk
-                    if "</" in buf and ">" in buf:
-                        on_scte(buf)
-                        buf = ""
         except Exception as exc:  # noqa: BLE001
             log.debug("tsp stderr reader ended: %s", exc)
 
-    log.info("watch egress=%s kind=%s url=%s", eid, args.tap_kind, args.tap_url)
-    bump_state(listening=True, locked=False, error=None)
+    # Prefer direct tsp IP for feed taps (preserves SCTE).
+    mode = "tsp-ip"
+    feed_host = (args.feed_host or "").strip()
+    feed_port = int(args.feed_port or 0)
+    if args.tap_kind == "feed":
+        if not feed_host or feed_port <= 0:
+            # Recover host/port from ffmpeg-style udp:// URL if spawn omitted them.
+            u = urlparse(args.tap_url)
+            feed_host = u.hostname or "127.0.0.1"
+            feed_port = int(u.port or 0)
+        if feed_port <= 0:
+            log.error("feed tap missing port")
+            return 1
+        tsp_direct = build_tsp_feed_argv(tsp, feed_host=feed_host, feed_port=feed_port)
+        ff_argv = None
+        tsp_pipe_argv = None
+    else:
+        caller = _parse_srt_caller(args.tap_url)
+        if caller:
+            mode = "tsp-srt"
+            tsp_direct = build_tsp_srt_argv(tsp, caller=caller)
+            ff_argv = None
+            tsp_pipe_argv = None
+        else:
+            mode = "ffmpeg-pipe"
+            if not shutil.which("ffmpeg") and not Path(str(ffmpeg)).is_file():
+                log.error("ffmpeg not found (needed for legacy SRT pipe)")
+                return 1
+            log.warning(
+                "SRT tap using ffmpeg remux — SCTE-35 PIDs may be dropped; "
+                "prefer a routed feed tap"
+            )
+            tsp_direct = None
+            ff_argv = [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "warning",
+                "-nostdin",
+                "-fflags",
+                "+genpts+discardcorrupt+nobuffer",
+                "-i",
+                args.tap_url,
+                "-map",
+                "0",
+                "-c",
+                "copy",
+                "-f",
+                "mpegts",
+                "pipe:1",
+            ]
+            tsp_pipe_argv = [
+                tsp,
+                "-I",
+                "file",
+                "-",
+                "-P",
+                "tables",
+                "--tid",
+                "0xFC",
+                f"--log-xml-line={SCTE_MARKER}",
+                "-O",
+                "drop",
+            ]
+
+    bump_state(listening=True, locked=False, error=None, engine=mode)
+    log.info(
+        "watch egress=%s kind=%s engine=%s url=%s",
+        eid,
+        args.tap_kind,
+        mode,
+        args.tap_url,
+    )
 
     try:
         while not _stop:
-            ff = subprocess.Popen(
-                ff_argv,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            tsp_proc = subprocess.Popen(
-                tsp_argv,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            assert ff.stdout is not None and tsp_proc.stdin is not None
-            pump = threading.Thread(
-                target=_pump_bytes,
-                args=(ff.stdout, tsp_proc.stdin, byte_counter),
-                kwargs={"stop_flag": lambda: _stop},
-                name="scte-pump",
-                daemon=True,
-            )
-            pump.start()
+            ff = None
+            tsp_proc: Optional[subprocess.Popen] = None
+            pump = None
+            if tsp_direct is not None:
+                tsp_proc = subprocess.Popen(
+                    tsp_direct,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+            else:
+                assert ff_argv is not None and tsp_pipe_argv is not None
+                ff = subprocess.Popen(
+                    ff_argv,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                tsp_proc = subprocess.Popen(
+                    tsp_pipe_argv,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                assert ff.stdout is not None and tsp_proc.stdin is not None
+                pump = threading.Thread(
+                    target=_pump_bytes,
+                    args=(ff.stdout, tsp_proc.stdin, byte_counter),
+                    kwargs={"stop_flag": lambda: _stop},
+                    name="scte-pump",
+                    daemon=True,
+                )
+                pump.start()
+
+            assert tsp_proc is not None and tsp_proc.stderr is not None
             reader = threading.Thread(
                 target=read_tsp_stderr,
                 args=(tsp_proc.stderr,),
@@ -461,15 +591,15 @@ def main() -> int:
 
             last_bytes = byte_counter[0]
             while not _stop:
-                if ff.poll() is not None or tsp_proc.poll() is not None:
+                if tsp_proc.poll() is not None or (ff is not None and ff.poll() is not None):
                     err = (
                         f"ffmpeg exited {ff.returncode}"
-                        if ff.poll() is not None
+                        if ff is not None and ff.poll() is not None
                         else f"tsp exited {tsp_proc.returncode}"
                     )
                     ff_err = ""
                     try:
-                        if ff.stderr is not None:
+                        if ff is not None and ff.stderr is not None:
                             ff_err = (
                                 ff.stderr.read(400)
                                 .decode("utf-8", errors="replace")
@@ -487,7 +617,13 @@ def main() -> int:
                 grew = nbytes > last_bytes
                 if grew:
                     last_bytes = nbytes
-                locked = nbytes > 0 or state.get("last_scte_at") is not None
+                # Direct tsp-ip: treat running process after a moment as locked
+                # even before the first count interval fires.
+                locked = (
+                    nbytes > 0
+                    or state.get("last_scte_at") is not None
+                    or (tsp_direct is not None and tsp_proc.poll() is None)
+                )
                 bump_state(
                     listening=True,
                     bytes_seen=nbytes,
@@ -496,6 +632,7 @@ def main() -> int:
                     ),
                     locked=bool(locked),
                     error=None if locked else state.get("error"),
+                    engine=mode,
                 )
                 time.sleep(0.5)
 

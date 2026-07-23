@@ -3,12 +3,14 @@
 nexbreak-egress — local feed → SRT (v1) / HLS (later).
 
 Reads the MPEG-TS UDP feed currently assigned by routing_assignments
-(processing local_feed_host:port) and pushes SRT via ffmpeg+libsrt.
+(processing local_feed_host:port) and pushes SRT.
 
-Self-healing: ffmpeg is restarted on exit. SRT listener URLs use
-peeridletimeout so a dropped client tears down the session; stderr is
-watched for mux I/O errors so a hung-but-alive ffmpeg is killed and
-recycled for the next VLC/connect.
+Default engine is TSDuck (`tsp -I ip … -O srt`) so SCTE-35 PIDs survive
+packet-faithfully. Set NEXBREAK_EGRESS_ENGINE=ffmpeg to use the legacy
+ffmpeg remux (known to drop stream_type 0x86 private data).
+
+Self-healing: the push process is restarted on exit. SRT listener mode uses
+tsp --multiple (or ffmpeg peeridletimeout) so a dropped client can reconnect.
 """
 
 from __future__ import annotations
@@ -27,9 +29,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nexbreak_db import audit, connect, get_egress_by_service, row_to_dict  # noqa: E402
 from nexbreak_pipeline import (  # noqa: E402
+    egress_engine,
     ffmpeg_egress_argv,
     require_bins,
     resolve_local_feed_host,
+    tsp_egress_argv,
 )
 
 log = logging.getLogger("nexbreak-egress")
@@ -37,7 +41,7 @@ _stop = False
 _proc: Optional[Popen] = None
 _kill_requested = False
 
-# stderr lines that mean the SRT session is dead but ffmpeg may still be alive
+# stderr lines that mean the SRT session is dead but the process may still be alive
 _FATAL_MARKERS = (
     "error submitting a packet to the muxer",
     "error muxing a packet",
@@ -46,6 +50,8 @@ _FATAL_MARKERS = (
     "input/output error",
     "connection timed out",
     "broken pipe",
+    "srt error",
+    "connection rejected",
 )
 
 
@@ -53,7 +59,7 @@ def _handle_signal(signum, _frame):
     global _stop
     log.info("signal %s — shutting down", signum)
     _stop = True
-    # Kill ffmpeg immediately — SRT listener otherwise blocks until the client leaves.
+    # Kill push immediately — SRT listener otherwise blocks until the client leaves.
     _kill(grace_s=0.4)
 
 
@@ -95,7 +101,7 @@ def _kill(grace_s: float = 1.0) -> None:
 
 
 def _stderr_watch(proc: Popen, stream) -> None:
-    """Kill ffmpeg if SRT mux is clearly dead (avoids hung listener)."""
+    """Kill push if SRT mux is clearly dead (avoids hung listener)."""
     global _kill_requested
     try:
         for raw in stream:
@@ -106,7 +112,7 @@ def _stderr_watch(proc: Popen, stream) -> None:
                 continue
             low = line.lower()
             if any(m in low for m in _FATAL_MARKERS):
-                log.warning("ffmpeg SRT fault — recycling: %s", line[:200])
+                log.warning("SRT fault — recycling: %s", line[:200])
                 _kill_requested = True
                 try:
                     proc.terminate()
@@ -119,9 +125,9 @@ def _stderr_watch(proc: Popen, stream) -> None:
                     except Exception:
                         pass
                 break
-            # Surface non-fatal ffmpeg lines so journal still shows activity.
+            # Surface non-fatal lines so journal still shows activity.
             if "non-existing pps" not in low and "no frame" not in low:
-                log.info("ffmpeg: %s", line[:300])
+                log.info("egress: %s", line[:300])
     except Exception as exc:  # noqa: BLE001
         log.debug("stderr watch ended: %s", exc)
 
@@ -134,10 +140,31 @@ def _spawn(argv: list[str]) -> Popen:
         target=_stderr_watch,
         args=(proc, proc.stdout),
         daemon=True,
-        name="egress-ff-watch",
+        name="egress-watch",
     )
     t.start()
     return proc
+
+
+def _build_argv(feed_host: str, feed_port: int, channel: dict[str, Any]) -> tuple[str, list[str]]:
+    engine = egress_engine()
+    if engine == "ffmpeg":
+        bins = require_bins("ffmpeg")
+        argv = ffmpeg_egress_argv(
+            ffmpeg=bins["ffmpeg"],
+            feed_host=feed_host,
+            feed_port=feed_port,
+            egress=channel,
+        )
+        return "ffmpeg", argv
+    bins = require_bins("tsp")
+    argv = tsp_egress_argv(
+        tsp=bins["tsp"],
+        feed_host=feed_host,
+        feed_port=feed_port,
+        egress=channel,
+    )
+    return "tsp", argv
 
 
 def main() -> int:
@@ -169,14 +196,17 @@ def main() -> int:
 
         source = _routed_source(conn, channel["id"])
         if source is None:
-            log.error("egress %s has no routing assignment — configure router first", channel["name"])
+            log.error(
+                "egress %s has no routing assignment — configure router first",
+                channel["name"],
+            )
             return 1
 
         feed_host = source["local_feed_host"] or "127.0.0.1"
         feed_port = int(source["local_feed_port"])
         feed_dest = resolve_local_feed_host(feed_host)
         log.info(
-            "plan: %s type=%s ← %s (%s:%s → %s:%s) srt_mode=%s",
+            "plan: %s type=%s ← %s (%s:%s → %s:%s) srt_mode=%s engine=%s",
             channel["name"],
             channel["output_type"],
             source["name"],
@@ -185,33 +215,21 @@ def main() -> int:
             feed_dest,
             feed_port,
             channel.get("srt_mode"),
+            egress_engine(),
         )
 
-        if args.once or args.dry_run:
-            bins = require_bins("ffmpeg")
-            argv = ffmpeg_egress_argv(
-                ffmpeg=bins["ffmpeg"],
-                feed_host=feed_host,
-                feed_port=feed_port,
-                egress=channel,
-            )
-            print("FFMPEG", " ".join(argv))
-            return 0
-
         try:
-            bins = require_bins("ffmpeg")
-            argv = ffmpeg_egress_argv(
-                ffmpeg=bins["ffmpeg"],
-                feed_host=feed_host,
-                feed_port=feed_port,
-                egress=channel,
-            )
+            engine, argv = _build_argv(feed_host, feed_port, channel)
         except Exception as exc:  # noqa: BLE001
             log.error("egress config error: %s", exc)
             return 1
 
-        log.info("ffmpeg: %s", " ".join(argv))
-        if "peeridletimeout=" not in " ".join(argv):
+        if args.once or args.dry_run:
+            print(engine.upper(), " ".join(argv))
+            return 0
+
+        log.info("%s: %s", engine, " ".join(argv))
+        if engine == "ffmpeg" and "peeridletimeout=" not in " ".join(argv):
             log.error(
                 "BUG: SRT URL missing peeridletimeout — wrong nexbreak_pipeline deployed?"
             )
@@ -225,7 +243,7 @@ def main() -> int:
             detail=(
                 f"nexbreak-egress@{args.service_name} up; "
                 f"udp://{feed_host}:{feed_port} → {channel['output_type']} "
-                f"(self-heal on SRT peer drop)"
+                f"via {engine} (self-heal on SRT peer drop)"
             ),
         )
 
@@ -241,7 +259,8 @@ def main() -> int:
                     time.sleep(0.1)
                     continue
                 log.warning(
-                    "ffmpeg recycled (%s code=%s) — restarting in %.1fs",
+                    "%s recycled (%s code=%s) — restarting in %.1fs",
+                    engine,
                     reason,
                     code,
                     backoff,
@@ -252,7 +271,7 @@ def main() -> int:
                         event_type="service_crash",
                         egress_channel_id=channel["id"],
                         result="failure",
-                        detail=f"ffmpeg {reason} code={code}; auto-restart",
+                        detail=f"{engine} {reason} code={code}; auto-restart",
                     )
                 except Exception:
                     pass
@@ -263,6 +282,12 @@ def main() -> int:
                 backoff = min(15.0, max(0.5, backoff * 1.4))
                 if _stop:
                     break
+                try:
+                    engine, argv = _build_argv(feed_host, feed_port, channel)
+                except Exception as exc:  # noqa: BLE001
+                    log.error("egress rebuild failed: %s", exc)
+                    time.sleep(2.0)
+                    continue
                 _proc = _spawn(argv)
                 continue
             # Healthy run — decay backoff toward fast reconnect.

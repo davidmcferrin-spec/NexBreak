@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import signal
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -228,3 +231,162 @@ def watch_alive(egress_id: int) -> bool:
         return True
     except OSError:
         return False
+
+
+SCTE_PROBE_MARKER = "##scte##"
+PSI_PROBE_MARKER = "##psi##"
+
+
+def probe_scte_feed(
+    feed_host: str,
+    feed_port: int,
+    *,
+    duration_s: float = 8.0,
+    scte_pid: Optional[int] = None,
+) -> dict[str, Any]:
+    """
+    One-shot TSDuck probe of the post-splice local feed.
+
+    Separates three facts operators confuse:
+      1) packets arriving on the feed
+      2) PMT declares an SCTE-35 PID (stream_type 0x86)
+      3) splice_information_table sections (TID 0xFC) actually seen
+
+    Uses tsp -I ip (not ffmpeg remux) so 0x86 PIDs are not stripped.
+    """
+    tsp = shutil.which("tsp") or os.environ.get("NEXBREAK_TSP", "tsp")
+    if not shutil.which("tsp") and not Path(str(tsp)).is_file():
+        return {"ok": False, "error": "tsp not found"}
+
+    dest = resolve_local_feed_host(feed_host)
+    port = int(feed_port)
+    secs = max(3.0, min(30.0, float(duration_s)))
+    argv = [
+        str(tsp),
+        "-I",
+        "ip",
+        f"{dest}:{port}",
+        "--local-address",
+        "127.0.0.1",
+        "-P",
+        "tables",
+        "--tid",
+        "0xFC",
+        f"--log-xml-line={SCTE_PROBE_MARKER}",
+        "-P",
+        "psi",
+        f"--log-xml-line={PSI_PROBE_MARKER}",
+        "-P",
+        "until",
+        f"--seconds={int(secs)}",
+        "-O",
+        "drop",
+    ]
+    # scte_pid is reserved for future --pid narrowing; TID 0xFC already scans all PIDs.
+    _ = scte_pid
+
+    started = time.time()
+    try:
+        proc = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=secs + 5.0,
+            check=False,
+        )
+        err = (proc.stderr or b"").decode("utf-8", errors="replace")
+    except subprocess.TimeoutExpired as exc:
+        err = (exc.stderr or b"").decode("utf-8", errors="replace") if exc.stderr else ""
+        proc = None  # type: ignore[assignment]
+    except FileNotFoundError:
+        return {"ok": False, "error": f"tsp not executable: {tsp}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+    sections: list[str] = []
+    pmt_scte_pids: list[int] = []
+    packets = 0
+    for line in err.splitlines():
+        if SCTE_PROBE_MARKER in line:
+            idx = line.find(SCTE_PROBE_MARKER)
+            blob = line[idx + len(SCTE_PROBE_MARKER) :].strip()
+            if blob.startswith("<"):
+                sections.append(blob[:400])
+        if PSI_PROBE_MARKER in line and (
+            "0x86" in line.lower() or 'stream_type="134"' in line
+        ):
+            for m in re.finditer(
+                r'(?:elementary_)?pid="?(0x[0-9A-Fa-f]+|\d+)"?'
+                r'[^>]*stream_type="?(?:0x86|134)"?'
+                r'|stream_type="?(?:0x86|134)"?[^>]*'
+                r'(?:elementary_)?pid="?(0x[0-9A-Fa-f]+|\d+)"?',
+                line,
+                re.I,
+            ):
+                raw = m.group(1) or m.group(2)
+                try:
+                    pid = int(raw, 0)
+                except ValueError:
+                    continue
+                if pid not in pmt_scte_pids:
+                    pmt_scte_pids.append(pid)
+        # tsp count-like / until / ip plugin progress
+        m = re.search(r"(\d[\d,]*)\s+packets?", line, re.I)
+        if m:
+            try:
+                packets = max(packets, int(m.group(1).replace(",", "")))
+            except ValueError:
+                pass
+
+    # Heuristic: any non-empty stderr with "ip:" or "tsp:" and no fatal usually means traffic.
+    has_traffic = packets > 0 or "ip:" in err.lower() or bool(sections) or bool(pmt_scte_pids)
+    # Looser traffic detect: until plugin ran without "no input"
+    if not has_traffic and proc is not None and proc.returncode == 0 and len(err) > 40:
+        has_traffic = "error" not in err.lower()[:200]
+
+    if not has_traffic and not sections and not pmt_scte_pids:
+        verdict = "no_packets"
+        summary = (
+            f"No usable packets on {dest}:{port} in {secs:.0f}s — "
+            "is nexbreak-proc running and routed?"
+        )
+    elif pmt_scte_pids and not sections:
+        verdict = "pmt_ok_no_sections"
+        summary = (
+            f"PMT declares SCTE-35 PID(s) {pmt_scte_pids} but no TID 0xFC "
+            f"sections in {secs:.0f}s — fire a splice from Roll while probing."
+        )
+    elif sections and not pmt_scte_pids:
+        verdict = "sections_without_pmt"
+        summary = (
+            f"Saw {len(sections)} SCTE section(s) but PMT 0x86 not parsed — "
+            "markers are on the wire; PMT XML may use a different attribute form."
+        )
+    elif sections:
+        verdict = "scte_on_wire"
+        summary = (
+            f"Confirmed: {len(sections)} SCTE-35 section(s) on feed "
+            f"{dest}:{port}; PMT SCTE PID(s)={pmt_scte_pids or 'unparsed'}."
+        )
+    else:
+        verdict = "pmt_missing"
+        summary = (
+            f"Feed has traffic but no PMT SCTE-35 (0x86) and no TID 0xFC "
+            f"in {secs:.0f}s — inject path may not be declaring/adding the PID."
+        )
+
+    return {
+        "ok": True,
+        "verdict": verdict,
+        "summary": summary,
+        "feed_dest": dest,
+        "feed_port": port,
+        "duration_s": secs,
+        "elapsed_s": round(time.time() - started, 2),
+        "packets_seen": packets,
+        "pmt_scte_pids": pmt_scte_pids,
+        "section_count": len(sections),
+        "section_samples": sections[:5],
+        "tsp_rc": None if proc is None else proc.returncode,
+    }

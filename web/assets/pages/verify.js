@@ -72,6 +72,7 @@
         : '<span class="badge warn">watch stopped</span>'
     );
     if (live.tap_kind) bits.push('<span class="badge dim">' + api.esc(live.tap_kind) + "</span>");
+    if (live.engine) bits.push('<span class="badge dim">' + api.esc(String(live.engine)) + "</span>");
     if (live.bytes_seen != null) {
       bits.push(
         '<span class="muted">' + api.esc(String(live.bytes_seen)) + " bytes</span>"
@@ -365,6 +366,49 @@
     }
     renderStatus(r.data && r.data.live);
     api.toast("Stopped", "success");
+  });
+
+  document.getElementById("btn-probe").addEventListener("click", async function () {
+    var item = currentItem();
+    if (!item) {
+      api.toast("Pick an output", "error");
+      return;
+    }
+    selectedId = Number(item.egress.id);
+    var btn = document.getElementById("btn-probe");
+    var box = document.getElementById("verify-probe");
+    btn.disabled = true;
+    btn.textContent = "Probing…";
+    box.innerHTML =
+      '<span class="muted">Running TSDuck on the post-splice feed (~8s) — fire a splice now if testing injection…</span>';
+    var r = await api.post("/v1/verify/" + selectedId + "/probe", { duration_s: 8 });
+    btn.disabled = false;
+    btn.textContent = "Probe feed";
+    if (!r.ok || !r.data || !r.data.ok) {
+      var err = (r.data && r.data.error) || ("Probe failed (HTTP " + (r.status || "?") + ")");
+      box.innerHTML = '<span class="badge warn">' + api.esc(err) + "</span>";
+      api.toast(err, "error");
+      return;
+    }
+    var v = r.data.verdict || "?";
+    var okish = v === "scte_on_wire" || v === "sections_without_pmt";
+    var badge = okish ? "ok" : v === "pmt_ok_no_sections" ? "warn" : "warn";
+    box.innerHTML =
+      '<div style="margin-top:4px">' +
+      '<span class="badge ' +
+      badge +
+      '">' +
+      api.esc(v) +
+      "</span> " +
+      api.esc(r.data.summary || "") +
+      '</div><div class="muted" style="margin-top:6px">sections=' +
+      api.esc(String(r.data.section_count != null ? r.data.section_count : 0)) +
+      " · pmt_pids=" +
+      api.esc(JSON.stringify(r.data.pmt_scte_pids || [])) +
+      " · packets≈" +
+      api.esc(String(r.data.packets_seen != null ? r.data.packets_seen : 0)) +
+      "</div>";
+    api.toast(okish ? "SCTE on the feed" : r.data.summary || v, okish ? "success" : "error");
   });
 
   loadEgresses();
