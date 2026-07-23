@@ -91,19 +91,7 @@
       "</tbody></table>";
     box.querySelectorAll("[data-copy]").forEach(function (btn) {
       btn.addEventListener("click", function () {
-        var u = btn.getAttribute("data-copy");
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(u).then(
-            function () {
-              api.toast("Copied", "success");
-            },
-            function () {
-              api.toast("Copy failed", "error");
-            }
-          );
-        } else {
-          api.toast(u, "info");
-        }
+        api.copyText(btn.getAttribute("data-copy"));
       });
     });
   }

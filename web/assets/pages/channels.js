@@ -71,6 +71,27 @@
     return s + " / " + o;
   }
 
+  /** Shareable URL for an SRT listener egress (clients connect as callers). */
+  function srtListenerUrl(port) {
+    var p = Number(port);
+    if (!p || p < 1 || p > 65535) return "";
+    var host = window.location.hostname || "127.0.0.1";
+    return "srt://" + host + ":" + p;
+  }
+
+  function refreshEgrListenUrl() {
+    var input = document.getElementById("e-listen-url");
+    if (!input) return;
+    var type = document.getElementById("e-output_type").value;
+    var mode = document.getElementById("e-srt_mode").value;
+    var port = document.getElementById("e-srt_listen_port").value;
+    if (type === "srt" && mode === "listener") {
+      input.value = srtListenerUrl(port) || "";
+    } else {
+      input.value = "";
+    }
+  }
+
   function setBitrateReadout(prefix, ch) {
     var sensed = ch.sensed_bitrate_kbps;
     var out = ch.output_bitrate_kbps;
@@ -138,6 +159,28 @@
               extras += ' <span class="badge dim" title="Preview enabled">PV</span>';
             }
           }
+          var actions =
+            '<button type="button" data-edit="' +
+            c.id +
+            '" data-kind="' +
+            kind +
+            '">Edit</button>';
+          if (
+            kind === "egr" &&
+            c.output_type === "srt" &&
+            c.srt_mode === "listener" &&
+            c.srt_listen_port
+          ) {
+            var listenUrl = srtListenerUrl(c.srt_listen_port);
+            if (listenUrl) {
+              actions +=
+                ' <button type="button" data-copy-url="' +
+                api.esc(listenUrl) +
+                '" title="' +
+                api.esc(listenUrl) +
+                '">Copy URL</button>';
+            }
+          }
           return (
             "<tr><td>" +
             statusBadge(kind, c) +
@@ -152,11 +195,9 @@
             api.esc(fmtBitrate(c)) +
             "</td><td class=\"muted\">@" +
             api.esc(c.service_name) +
-            '</td><td><button type="button" data-edit="' +
-            c.id +
-            '" data-kind="' +
-            kind +
-            '">Edit</button></td></tr>'
+            "</td><td>" +
+            actions +
+            "</td></tr>"
           );
         })
         .join("") +
@@ -168,6 +209,11 @@
         var kindBtn = btn.getAttribute("data-kind");
         if (kindBtn === "proc") openProcEdit(id);
         else openEgrEdit(id);
+      });
+    });
+    el.querySelectorAll("[data-copy-url]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        api.copyText(btn.getAttribute("data-copy-url"));
       });
     });
   }
@@ -296,6 +342,7 @@
       el.hidden = type !== "hls" || hlsMode !== "push_put";
     });
     document.getElementById("egr-hls-warn").hidden = type !== "hls";
+    refreshEgrListenUrl();
   }
 
   function openEgrEdit(id) {
@@ -385,6 +432,11 @@
   document.getElementById("e-output_type").addEventListener("change", syncEgrFields);
   document.getElementById("e-srt_mode").addEventListener("change", syncEgrFields);
   document.getElementById("e-hls_mode").addEventListener("change", syncEgrFields);
+  document.getElementById("e-srt_listen_port").addEventListener("input", refreshEgrListenUrl);
+  document.getElementById("btn-egr-copy-url").addEventListener("click", function () {
+    var url = document.getElementById("e-listen-url").value;
+    api.copyText(url);
+  });
 
   document.getElementById("btn-proc-save").addEventListener("click", async function () {
     var id = document.getElementById("p-id").value;

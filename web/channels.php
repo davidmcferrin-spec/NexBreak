@@ -146,6 +146,17 @@ require __DIR__ . '/include/header.php';
     <label class="egr-srt egr-srt-remote">Remote host <input id="e-srt_remote_host" placeholder="10.0.0.50"></label>
     <label class="egr-srt egr-srt-remote">Remote port <input type="number" id="e-srt_remote_port" min="1" max="65535"></label>
     <label class="egr-srt egr-srt-listen">Listen port <input type="number" id="e-srt_listen_port" min="1" max="65535"></label>
+    <div class="egr-srt egr-srt-listen egr-listen-url" style="grid-column:1/-1">
+      <label for="e-listen-url">Client URL (VLC / CDN)</label>
+      <div class="bar" style="margin-top:4px">
+        <input id="e-listen-url" readonly style="flex:1;min-width:12rem" spellcheck="false">
+        <button type="button" id="btn-egr-copy-url">Copy</button>
+      </div>
+      <p class="muted" style="margin:6px 0 0;font-size:12px">
+        Players connect as SRT callers to this listener. Hostname comes from your browser address bar
+        (use the appliance LAN name/IP in the URL bar for a pasteable remote link).
+      </p>
+    </div>
     <label class="egr-hls">HLS mode
       <select id="e-hls_mode">
         <option value="origin_pull">Origin pull (we host)</option>

@@ -53,6 +53,42 @@
       .replace(/"/g, "&quot;");
   }
 
+  function copyText(text) {
+    text = String(text == null ? "" : text);
+    if (!text) {
+      toast("Nothing to copy", "error");
+      return Promise.resolve(false);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(
+        function () {
+          toast("Copied", "success");
+          return true;
+        },
+        function () {
+          toast("Copy failed", "error");
+          return false;
+        }
+      );
+    }
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      toast(ok ? "Copied" : "Copy failed", ok ? "success" : "error");
+      return Promise.resolve(ok);
+    } catch (e) {
+      toast(text, "info");
+      return Promise.resolve(false);
+    }
+  }
+
   function fmtTime(iso) {
     if (!iso) return "—";
     try {
@@ -68,6 +104,7 @@
     del: function (path) { return request("DELETE", path); },
     toast: toast,
     esc: esc,
+    copyText: copyText,
     fmtTime: fmtTime,
   };
 })(typeof window !== "undefined" ? window : globalThis);
