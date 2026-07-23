@@ -118,7 +118,7 @@
         '<span class="muted">' + api.esc(String(live.bytes_seen)) + " bytes</span>"
       );
     }
-    if (listening || live.listening) && live.scte_null_count) {
+    if ((listening || live.listening) && live.scte_null_count) {
       bits.push(
         '<span class="badge dim">keepalive ' +
           api.esc(String(live.scte_null_count)) +
@@ -485,15 +485,15 @@
     box.innerHTML = items
       .map(function (it) {
         var eg = it.egress;
-        var mode = eg.srt_mode || "?";
-        var port = eg.srt_listen_port || eg.srt_remote_port || "";
-        var label =
-          eg.name +
-          " (@" +
-          eg.service_name +
-          ") · " +
-          mode +
-          (port ? " :" + port : "");
+        var detail = "";
+        if (eg.output_type === "hls") {
+          detail = "hls · " + (eg.hls_mode || "origin_pull");
+        } else {
+          var mode = eg.srt_mode || "?";
+          var port = eg.srt_listen_port || eg.srt_remote_port || "";
+          detail = mode + (port ? " :" + port : "");
+        }
+        var label = eg.name + " (@" + eg.service_name + ") · " + detail;
         return (
           '<option value="' +
           eg.id +
