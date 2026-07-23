@@ -260,6 +260,8 @@
       ch.decklink_device_index != null ? ch.decklink_device_index : "";
     document.getElementById("p-ingest_mode").value = ch.ingest_mode || "copy";
     document.getElementById("p-delay").value = ch.splice_insertion_delay_ms || 0;
+    document.getElementById("p-scte35_pid").value =
+      ch.scte35_pid != null ? ch.scte35_pid : 500;
     document.getElementById("p-feed_port").value = ch.local_feed_port || "";
     setBitrateReadout("p", ch);
     document.getElementById("p-preview_path").value = ch.preview_path || "";
@@ -418,6 +420,7 @@
         : null,
       ingest_mode: document.getElementById("p-ingest_mode").value,
       splice_insertion_delay_ms: Number(document.getElementById("p-delay").value),
+      scte35_pid: Number(document.getElementById("p-scte35_pid").value) || 500,
       local_feed_port: Number(document.getElementById("p-feed_port").value),
       preview_path: document.getElementById("p-preview_path").value || null,
       preview_enabled: Number(document.getElementById("p-preview_enabled").value),

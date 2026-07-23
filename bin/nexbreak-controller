@@ -21,14 +21,19 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nexbreak_db import (  # noqa: E402
+    SPLICE_TYPES,
     audit,
     connect,
     control_sock_path,
+    delete_splice_preset,
+    get_splice_preset,
     init_schema,
+    list_splice_presets,
     migrate,
     preview_path_for,
     row_to_dict,
     rows_to_dicts,
+    upsert_splice_preset,
 )
 from nexbreak_pipeline import enrich_channel_bitrate  # noqa: E402
 from nexbreak_control import send_caption_set, send_caption_status, send_splice  # noqa: E402
@@ -42,6 +47,152 @@ MEDIAMTX_API = os.environ.get("NEXBREAK_MEDIAMTX_API", "http://127.0.0.1:9997")
 
 def db():
     return connect(DB_PATH)
+
+
+def _resolve_splice_request(
+    conn, body: dict[str, Any]
+) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]], Optional[str]]:
+    """
+    Resolve channel + splice params from body/query.
+    Returns (channel, fire_fields, error).
+    fire_fields: splice_type, hex_payload, auto_return, break_duration_sec, use_channel_delay, preset
+    """
+    try:
+        channel_id = int(body.get("processing_channel_id") or 0)
+    except (TypeError, ValueError):
+        return None, None, "processing_channel_id required"
+    if channel_id <= 0:
+        return None, None, "processing_channel_id required"
+    row = conn.execute(
+        "SELECT * FROM processing_channels WHERE id = ?", (channel_id,)
+    ).fetchone()
+    if not row:
+        return None, None, "processing channel not found"
+    channel = row_to_dict(row)
+    assert channel is not None
+
+    preset = None
+    preset_id = body.get("preset_id")
+    preset_slug = body.get("preset") or body.get("slug")
+    if preset_id is not None and str(preset_id).strip() != "":
+        try:
+            preset = get_splice_preset(conn, preset_id=int(preset_id))
+        except (TypeError, ValueError):
+            return None, None, "invalid preset_id"
+        if not preset:
+            return None, None, "preset not found"
+    elif preset_slug:
+        preset = get_splice_preset(conn, slug=str(preset_slug).strip())
+        if not preset:
+            return None, None, f"preset not found: {preset_slug}"
+        if not int(preset.get("enabled") or 0):
+            return None, None, f"preset disabled: {preset_slug}"
+
+    if preset:
+        fire = {
+            "splice_type": preset["splice_type"],
+            "hex_payload": preset.get("hex_payload"),
+            "auto_return": bool(int(preset.get("auto_return") or 0)),
+            "break_duration_sec": preset.get("break_duration_sec"),
+            "use_channel_delay": bool(int(preset.get("use_channel_delay", 1))),
+            "preset": preset,
+        }
+    else:
+        splice_type = body.get("splice_type") or "splice_start_immediate"
+        if splice_type not in SPLICE_TYPES:
+            return None, None, f"invalid splice_type {splice_type}"
+        br = body.get("break_duration_sec")
+        fire = {
+            "splice_type": splice_type,
+            "hex_payload": body.get("hex_payload"),
+            "auto_return": bool(body.get("auto_return")),
+            "break_duration_sec": float(br) if br not in (None, "") else None,
+            "use_channel_delay": bool(body.get("use_channel_delay", True)),
+            "preset": None,
+        }
+    return channel, fire, None
+
+
+def _execute_splice(
+    conn,
+    *,
+    channel: dict[str, Any],
+    fire: dict[str, Any],
+    source_ip: str,
+) -> tuple[int, dict[str, Any]]:
+    """Run splice against proc; audit; return (http_code, body)."""
+    channel_id = int(channel["id"])
+    splice_type = fire["splice_type"]
+    hex_payload = fire.get("hex_payload")
+    sock = control_sock_path(channel["service_name"])
+    delay_ms = int(channel.get("splice_insertion_delay_ms") or 0)
+    if not fire.get("use_channel_delay") or splice_type == "splice_cancel":
+        delay_ms = 0
+    timeout = max(30.0, delay_ms / 1000.0 + 15.0)
+    preset = fire.get("preset")
+    detail_prefix = f"preset={preset['slug']} " if preset else ""
+
+    try:
+        result = send_splice(
+            sock,
+            splice_type=splice_type,
+            hex_payload=hex_payload,
+            auto_return=bool(fire.get("auto_return")),
+            break_duration_sec=fire.get("break_duration_sec"),
+            use_channel_delay=bool(fire.get("use_channel_delay", True)),
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        eid = audit(
+            conn,
+            event_type="splice_command",
+            processing_channel_id=channel_id,
+            splice_type=splice_type,
+            splice_hex_payload=hex_payload,
+            source_ip=source_ip,
+            result="failure",
+            detail=f"{detail_prefix}proc socket missing: {sock}",
+        )
+        return 503, {
+            "ok": False,
+            "audit_id": eid,
+            "error": f"processing service not running ({sock})",
+        }
+    except Exception as exc:  # noqa: BLE001
+        eid = audit(
+            conn,
+            event_type="splice_command",
+            processing_channel_id=channel_id,
+            splice_type=splice_type,
+            splice_hex_payload=hex_payload,
+            source_ip=source_ip,
+            result="failure",
+            detail=f"{detail_prefix}{exc}",
+        )
+        return 502, {"ok": False, "audit_id": eid, "error": str(exc)}
+
+    ok = bool(result.get("ok"))
+    eid = audit(
+        conn,
+        event_type="splice_command",
+        processing_channel_id=channel_id,
+        splice_type=splice_type,
+        splice_hex_payload=hex_payload,
+        source_ip=source_ip,
+        result="success" if ok else "failure",
+        detail=detail_prefix + (result.get("detail") or result.get("error") or ""),
+    )
+    body = {
+        "ok": ok,
+        "audit_id": eid,
+        "delay_ms": result.get("delay_ms", delay_ms),
+        "event_id": result.get("event_id"),
+        "splice_type": splice_type,
+        "message": result.get("detail") or result.get("error"),
+    }
+    if preset:
+        body["preset"] = {"id": preset["id"], "slug": preset["slug"], "label": preset["label"]}
+    return (202 if ok else 502), body
 
 
 def _enrich_egress_bitrate(conn, egress: dict[str, Any]) -> dict[str, Any]:
@@ -356,20 +507,72 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/v1/audit":
                 limit = int((qs.get("limit") or ["50"])[0])
                 limit = max(1, min(limit, 500))
+                clauses: list[str] = []
+                params: list[Any] = []
+                et = (qs.get("event_type") or [None])[0]
+                if et:
+                    clauses.append("ae.event_type = ?")
+                    params.append(et)
+                pcid = (qs.get("processing_channel_id") or [None])[0]
+                if pcid:
+                    clauses.append("ae.processing_channel_id = ?")
+                    params.append(int(pcid))
+                where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+                params.append(limit)
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT ae.*, pc.name AS processing_name, ec.name AS egress_name,
                            cc.label AS credential_label
                     FROM audit_events ae
                     LEFT JOIN processing_channels pc ON pc.id = ae.processing_channel_id
                     LEFT JOIN egress_channels ec ON ec.id = ae.egress_channel_id
                     LEFT JOIN control_credentials cc ON cc.id = ae.triggered_by_credential_id
+                    {where}
                     ORDER BY ae.occurred_at DESC, ae.id DESC
                     LIMIT ?
                     """,
-                    (limit,),
+                    params,
                 ).fetchall()
                 self._send(200, {"ok": True, "events": rows_to_dicts(rows)})
+                return
+
+            if path == "/v1/splice/presets":
+                migrate(conn)
+                enabled_only = (qs.get("enabled") or [""])[0] in ("1", "true", "yes")
+                self._send(
+                    200,
+                    {
+                        "ok": True,
+                        "presets": list_splice_presets(conn, enabled_only=enabled_only),
+                    },
+                )
+                return
+
+            if path.startswith("/v1/splice/presets/"):
+                migrate(conn)
+                pid = int(path.split("/")[4])
+                preset = get_splice_preset(conn, preset_id=pid)
+                if not preset:
+                    self._send(404, {"ok": False, "error": "preset not found"})
+                    return
+                self._send(200, {"ok": True, "preset": preset})
+                return
+
+            if path == "/v1/splice":
+                # Panel-friendly GET fire (DNF / StreamDeck).
+                migrate(conn)
+                body = {k: (v[0] if v else None) for k, v in qs.items()}
+                channel, fire, err = _resolve_splice_request(conn, body)
+                if err or not channel or not fire:
+                    self._send(400, {"ok": False, "error": err or "bad request"})
+                    return
+                code, resp = _execute_splice(
+                    conn,
+                    channel=channel,
+                    fire=fire,
+                    source_ip=self.client_address[0],
+                )
+                self._send(code, resp)
                 return
 
             if path == "/v1/captions/lexicon":
@@ -475,86 +678,71 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/v1/splice":
                 # Panel / Streamdeck / roll-button entry point.
-                channel_id = int(body.get("processing_channel_id") or 0)
-                splice_type = body.get("splice_type") or "splice_start_immediate"
-                hex_payload = body.get("hex_payload")
-                row = conn.execute(
-                    "SELECT * FROM processing_channels WHERE id = ?", (channel_id,)
-                ).fetchone()
-                if not row:
-                    self._send(404, {"ok": False, "error": "processing channel not found"})
+                migrate(conn)
+                channel, fire, err = _resolve_splice_request(conn, body)
+                if err or not channel or not fire:
+                    code = 404 if err and "not found" in err else 400
+                    self._send(code, {"ok": False, "error": err or "bad request"})
                     return
-                channel = row_to_dict(row)
-                assert channel is not None
-                sock = control_sock_path(channel["service_name"])
-                delay_ms = int(channel["splice_insertion_delay_ms"] or 0)
-                # Cancel is fast; start/end may sleep delay_ms inside the proc.
-                timeout = max(30.0, delay_ms / 1000.0 + 15.0)
+                code, resp = _execute_splice(
+                    conn,
+                    channel=channel,
+                    fire=fire,
+                    source_ip=self.client_address[0],
+                )
+                self._send(code, resp)
+                return
+
+            if path == "/v1/splice/presets":
+                migrate(conn)
                 try:
-                    result = send_splice(
-                        sock,
-                        splice_type=splice_type,
-                        hex_payload=hex_payload,
-                        timeout=timeout,
-                    )
-                except FileNotFoundError:
-                    eid = audit(
-                        conn,
-                        event_type="splice_command",
-                        processing_channel_id=channel_id,
-                        splice_type=splice_type,
-                        splice_hex_payload=hex_payload,
-                        source_ip=self.client_address[0],
-                        result="failure",
-                        detail=f"proc socket missing: {sock}",
-                    )
-                    self._send(
-                        503,
-                        {
-                            "ok": False,
-                            "audit_id": eid,
-                            "error": f"processing service not running ({sock})",
-                        },
-                    )
+                    preset = upsert_splice_preset(conn, body)
+                except ValueError as exc:
+                    self._send(400, {"ok": False, "error": str(exc)})
                     return
                 except Exception as exc:  # noqa: BLE001
-                    eid = audit(
-                        conn,
-                        event_type="splice_command",
-                        processing_channel_id=channel_id,
-                        splice_type=splice_type,
-                        splice_hex_payload=hex_payload,
-                        source_ip=self.client_address[0],
-                        result="failure",
-                        detail=str(exc),
-                    )
-                    self._send(
-                        502,
-                        {"ok": False, "audit_id": eid, "error": str(exc)},
-                    )
+                    self._send(400, {"ok": False, "error": str(exc)})
                     return
-
-                ok = bool(result.get("ok"))
-                eid = audit(
+                audit(
                     conn,
-                    event_type="splice_command",
-                    processing_channel_id=channel_id,
-                    splice_type=splice_type,
-                    splice_hex_payload=hex_payload,
+                    event_type="config_change",
                     source_ip=self.client_address[0],
-                    result="success" if ok else "failure",
-                    detail=result.get("detail") or result.get("error"),
+                    result="success",
+                    detail=f"splice preset create slug={preset.get('slug')}",
                 )
-                self._send(
-                    202 if ok else 502,
-                    {
-                        "ok": ok,
-                        "audit_id": eid,
-                        "delay_ms": result.get("delay_ms", delay_ms),
-                        "event_id": result.get("event_id"),
-                        "message": result.get("detail") or result.get("error"),
-                    },
+                self._send(200, {"ok": True, "preset": preset})
+                return
+
+            if path.startswith("/v1/splice/presets/"):
+                migrate(conn)
+                pid = int(path.split("/")[4])
+                if body.get("delete") or body.get("_method") == "DELETE":
+                    ok = delete_splice_preset(conn, pid)
+                    if not ok:
+                        self._send(404, {"ok": False, "error": "preset not found"})
+                        return
+                    audit(
+                        conn,
+                        event_type="config_change",
+                        source_ip=self.client_address[0],
+                        result="success",
+                        detail=f"splice preset delete id={pid}",
+                    )
+                    self._send(200, {"ok": True})
+                    return
+                try:
+                    preset = upsert_splice_preset(conn, body, preset_id=pid)
+                except ValueError as exc:
+                    self._send(400, {"ok": False, "error": str(exc)})
+                    return
+                audit(
+                    conn,
+                    event_type="config_change",
+                    source_ip=self.client_address[0],
+                    result="success",
+                    detail=f"splice preset update slug={preset.get('slug')}",
                 )
+                self._send(200, {"ok": True, "preset": preset})
                 return
 
             if path == "/v1/routing":

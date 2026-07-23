@@ -423,32 +423,56 @@ def scte35_xml(
     splice_type: str,
     event_id: int,
     hex_payload: Optional[str] = None,
+    auto_return: bool = False,
+    break_duration_sec: Optional[float] = None,
 ) -> Optional[str]:
     """
     Build a TSDuck XML splice_information_table, or None if hex_payload should
     be sent as raw binary instead.
+
+    Maps NexBreak splice_type → SCTE-35 splice_insert:
+      *_immediate → splice_immediate=true
+      *_normal    → splice_immediate=false
+      auto_return → optional break_duration (90 kHz ticks) on start events
     """
     if hex_payload:
         return None
 
-    # Map NexBreak splice_type → SCTE-35 splice_insert attributes
-    if splice_type == "splice_cancel":
+    st = (splice_type or "").strip()
+    if st == "splice_cancel":
         body = (
             f'<splice_insert splice_event_id="{event_id}" '
             f'splice_event_cancel="true"/>'
         )
-    elif splice_type in ("splice_end_immediate", "splice_end_normal"):
-        # Return to network (splice in)
-        body = (
-            f'<splice_insert splice_event_id="{event_id}" '
-            f'out_of_network="false" splice_immediate="true"/>'
-        )
     else:
-        # splice_start_immediate / splice_start_normal — out of network
-        body = (
-            f'<splice_insert splice_event_id="{event_id}" '
-            f'out_of_network="true" splice_immediate="true"/>'
-        )
+        out_of_network = "true" if st.startswith("splice_start") else "false"
+        splice_immediate = "true" if st.endswith("_immediate") else "false"
+        # Auto-return only meaningful on out-of-network (start) inserts.
+        break_xml = ""
+        if (
+            auto_return
+            and st.startswith("splice_start")
+            and break_duration_sec is not None
+            and float(break_duration_sec) > 0
+        ):
+            ticks = int(round(float(break_duration_sec) * 90000.0))
+            break_xml = (
+                f'<break_duration auto_return="true" duration="{ticks}"/>'
+            )
+        if break_xml:
+            body = (
+                f'<splice_insert splice_event_id="{event_id}" '
+                f'out_of_network="{out_of_network}" '
+                f'splice_immediate="{splice_immediate}">'
+                f"{break_xml}"
+                f"</splice_insert>"
+            )
+        else:
+            body = (
+                f'<splice_insert splice_event_id="{event_id}" '
+                f'out_of_network="{out_of_network}" '
+                f'splice_immediate="{splice_immediate}"/>'
+            )
 
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'

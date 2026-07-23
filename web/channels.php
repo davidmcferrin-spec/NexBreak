@@ -77,6 +77,7 @@ require __DIR__ . '/include/header.php';
       </select>
     </label>
     <label>Splice delay (ms) <input type="number" id="p-delay" min="0" step="100"></label>
+    <label>SCTE-35 PID <input type="number" id="p-scte35_pid" min="16" max="8190" step="1" title="PMT stream type 0x86"></label>
     <label>Local feed port <input type="number" id="p-feed_port"></label>
     <div class="bitrate-readout" id="p-bitrate-box">
       <div class="muted" style="font-size:0.85rem;margin-bottom:4px">Bitrate (auto from live feed)</div>
@@ -107,6 +108,11 @@ require __DIR__ . '/include/header.php';
   </form>
   <p class="warn-banner" id="proc-rtsp-push-warn" hidden style="margin-top:10px">
     RTSP <code>server_push</code> needs an embedded RTSP server — not in v1 yet. Prefer <code>client_pull</code>.
+  </p>
+  <p class="warn-banner" style="margin-top:10px">
+    Splice delay is the pre-roll wait before inject (restart <code>nexbreak-proc@N</code> after changing delay/PID).
+    Roll buttons and panel URLs are configured on <a href="/triggers.php">Triggers</a>
+    (<a href="/docs/panel-api.md">panel API</a> when served from the install tree).
   </p>
   <p class="warn-banner" style="margin-top:10px">
     Caption policy is hot: Off/Auto/Force ASR may restart this channel’s pipeline when the

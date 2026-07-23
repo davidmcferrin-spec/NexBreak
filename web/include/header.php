@@ -14,6 +14,7 @@ $activeNav = $activeNav ?? '';
 $nav = [
     'dashboard' => ['href' => '/index.php', 'label' => 'Dashboard'],
     'roll' => ['href' => '/roll.php', 'label' => 'Roll'],
+    'triggers' => ['href' => '/triggers.php', 'label' => 'Triggers'],
     'preview' => ['href' => '/preview.php', 'label' => 'Preview'],
     'channels' => ['href' => '/channels.php', 'label' => 'Channels'],
     'router' => ['href' => '/router.php', 'label' => 'Router'],

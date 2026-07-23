@@ -34,6 +34,9 @@ def send_splice(
     splice_type: str,
     hex_payload: Optional[str] = None,
     event_id: Optional[int] = None,
+    auto_return: bool = False,
+    break_duration_sec: Optional[float] = None,
+    use_channel_delay: bool = True,
     timeout: float = 60.0,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {"cmd": "splice", "splice_type": splice_type}
@@ -41,6 +44,11 @@ def send_splice(
         body["hex_payload"] = hex_payload
     if event_id is not None:
         body["event_id"] = event_id
+    if auto_return:
+        body["auto_return"] = True
+    if break_duration_sec is not None:
+        body["break_duration_sec"] = float(break_duration_sec)
+    body["use_channel_delay"] = bool(use_channel_delay)
     # Allow delay_ms up to ~channel delay + inject overhead
     return proc_request(sock_path, body, timeout=timeout)
 

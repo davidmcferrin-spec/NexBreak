@@ -493,7 +493,11 @@ def _apply_splice(
     splice_type: str,
     hex_payload: Optional[str],
     event_id: Optional[int],
+    *,
     skip_delay: bool = False,
+    auto_return: bool = False,
+    break_duration_sec: Optional[float] = None,
+    use_channel_delay: bool = True,
 ) -> dict[str, Any]:
     global _event_id
     eid = int(event_id) if event_id is not None else _event_id
@@ -501,7 +505,7 @@ def _apply_splice(
         _event_id += 1
 
     delay_ms = int(_channel.get("splice_insertion_delay_ms") or 0)
-    if splice_type == "splice_cancel":
+    if not use_channel_delay or splice_type == "splice_cancel":
         delay_ms = 0
     if not skip_delay and delay_ms > 0:
         log.info("splice %s event_id=%s — waiting %s ms", splice_type, eid, delay_ms)
@@ -511,15 +515,24 @@ def _apply_splice(
         if _stop:
             return {"ok": False, "error": "aborted"}
 
-    xml = scte35_xml(splice_type=splice_type, event_id=eid, hex_payload=hex_payload)
+    xml = scte35_xml(
+        splice_type=splice_type,
+        event_id=eid,
+        hex_payload=hex_payload,
+        auto_return=bool(auto_return),
+        break_duration_sec=break_duration_sec,
+    )
     if xml is None:
         assert hex_payload is not None
         raw = hex_to_bytes(hex_payload)
         _send_to_spliceinject(raw)
-        detail = f"hex payload {len(raw)} bytes → udp/{_splice_udp}"
+        detail = f"hex payload {len(raw)} bytes event_id={eid} → udp/{_splice_udp}"
     else:
         _send_to_spliceinject(xml.encode("utf-8"))
-        detail = f"xml event_id={eid} → udp/{_splice_udp}"
+        extra = ""
+        if auto_return and break_duration_sec:
+            extra = f" auto_return={break_duration_sec}s"
+        detail = f"xml event_id={eid}{extra} → udp/{_splice_udp}"
 
     log.info("injected %s (%s)", splice_type, detail)
     return {"ok": True, "event_id": eid, "detail": detail, "delay_ms": delay_ms}
@@ -611,6 +624,13 @@ class _ControlHandler(socketserver.StreamRequestHandler):
                     splice_type=req.get("splice_type") or "splice_start_immediate",
                     hex_payload=req.get("hex_payload"),
                     event_id=req.get("event_id"),
+                    auto_return=bool(req.get("auto_return")),
+                    break_duration_sec=(
+                        float(req["break_duration_sec"])
+                        if req.get("break_duration_sec") is not None
+                        else None
+                    ),
+                    use_channel_delay=bool(req.get("use_channel_delay", True)),
                 )
                 self._reply(result)
             except Exception as exc:  # noqa: BLE001

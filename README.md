@@ -11,7 +11,9 @@ See `CLAUDE.md` for the full design record.
 
 - Up to 4 feeds (RTSP, SRT, DeckLink) → SRT/HLS egress
 - Manual SCTE-35 splice control per stream (Streamdeck / DNF / web Roll)
+- Global **Triggers** preset library (immediate/normal, auto-return, hex)
 - Operator-tunable trigger→insertion delay (pre-roll for GOP-aligned cues)
+- Panel REST documented in [`docs/panel-api.md`](docs/panel-api.md)
 - Shared caption lexicon + blacklist; caption policy auto/force ASR/off with CEA-608 on SRT
 - Software router between processed feeds and egress adapters
 
@@ -54,12 +56,15 @@ RTSP/SRT source  (ffmpeg client_pull, low-latency flags)
 Splice path:
 
 ```
-Web/panel → POST /api/v1/splice → controller
+Web/panel → GET|POST /api/v1/splice?preset=roll&processing_channel_id=1
+         → controller (resolve preset → XML/hex)
          → Unix socket /run/nexbreak/proc-<id>.sock
          → wait splice_insertion_delay_ms
          → UDP SCTE-35 XML/hex → tsp spliceinject
 ```
 
+Panel / StreamDeck / DNF USP3-16 URL cookbook: **[`docs/panel-api.md`](docs/panel-api.md)**.
+Configure presets in the web **Triggers** page.
 ### WebRTC preview
 
 | Piece | Detail |

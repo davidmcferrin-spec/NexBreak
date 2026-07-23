@@ -9,11 +9,7 @@
   var ccClients = [];
   var captionsOn = cc ? cc.getPref() : false;
 
-  var SPLICE_TYPES = [
-    { value: "splice_start_immediate", label: "ROLL" },
-    { value: "splice_end_immediate", label: "END" },
-    { value: "splice_cancel", label: "CANCEL" },
-  ];
+  var presets = [];
 
   function syncCcButton() {
     if (!btnCc) return;
@@ -37,19 +33,22 @@
     ccClients = [];
   }
 
-  async function fire(channelId, spliceType, btn) {
+  async function fire(channelId, preset, btn) {
     btn.disabled = true;
     try {
-      var res = await api.post("/v1/splice", {
-        processing_channel_id: channelId,
-        splice_type: spliceType,
-      });
+      var body = { processing_channel_id: channelId };
+      if (preset && preset.slug) body.preset = preset.slug;
+      else if (preset && preset.splice_type) body.splice_type = preset.splice_type;
+      var res = await api.post("/v1/splice", body);
       if (!res.ok || !res.data || !res.data.ok) {
         api.toast((res.data && res.data.error) || "Splice failed", "error");
         return;
       }
       api.toast(
-        "Injected · delay " +
+        (preset && preset.label ? preset.label + " · " : "") +
+          "event " +
+          (res.data.event_id != null ? res.data.event_id : "—") +
+          " · delay " +
           (res.data.delay_ms || 0) +
           " ms · audit #" +
           res.data.audit_id,
@@ -64,13 +63,22 @@
 
   async function load() {
     teardown();
-    var [proc, preview] = await Promise.all([
+    var [proc, preview, pr] = await Promise.all([
       api.get("/v1/processing"),
       api.get("/v1/preview"),
+      api.get("/v1/splice/presets?enabled=1"),
     ]);
     if (!proc.ok || !proc.data) {
       grid.innerHTML = '<div class="empty">Controller unreachable</div>';
       return;
+    }
+    presets = (pr.ok && pr.data && pr.data.presets) || [];
+    if (!presets.length) {
+      presets = [
+        { slug: "roll", label: "ROLL", splice_type: "splice_start_immediate" },
+        { slug: "end", label: "END", splice_type: "splice_end_immediate" },
+        { slug: "cancel", label: "CANCEL", splice_type: "splice_cancel" },
+      ];
     }
 
     var whepPort =
@@ -149,14 +157,15 @@
       }
 
       var bar = card.querySelector(".bar");
-      SPLICE_TYPES.forEach(function (t) {
+      presets.forEach(function (t) {
         var b = document.createElement("button");
         b.type = "button";
-        b.textContent = t.label;
-        if (t.value === "splice_start_immediate") b.className = "roll";
-        if (t.value === "splice_cancel") b.className = "danger";
+        b.textContent = t.label || t.slug;
+        var st = t.splice_type || "";
+        if (st.indexOf("start") >= 0) b.className = "roll";
+        if (st === "splice_cancel") b.className = "danger";
         b.addEventListener("click", function () {
-          fire(ch.id, t.value, b);
+          fire(ch.id, t, b);
         });
         bar.appendChild(b);
       });

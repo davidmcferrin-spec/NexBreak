@@ -350,6 +350,11 @@ def main() -> int:
     def on_scte(xml_blob: str) -> None:
         parsed = parse_scte_xml(xml_blob)
         if not parsed:
+            log.warning(
+                "SCTE XML seen but parse failed (first 200 chars): %s",
+                (xml_blob or "")[:200],
+            )
+            bump_state(error="SCTE XML parse failed — see scte-watch log")
             return
         now = time.time()
         verified = False

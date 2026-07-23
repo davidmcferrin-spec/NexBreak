@@ -34,6 +34,14 @@ require __DIR__ . '/include/header.php';
 </section>
 
 <section class="panel">
+  <h2>Recent injects</h2>
+  <p class="muted" style="margin-bottom:8px">
+    Controller audit for splice commands — confirmation even if the bitstream watch is quiet.
+  </p>
+  <div id="verify-injects"><div class="empty">No recent splice commands</div></div>
+</section>
+
+<section class="panel">
   <h2>SCTE sightings</h2>
   <div id="verify-events"><div class="empty">Start listening, then fire a splice from Roll.</div></div>
 </section>

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -129,6 +130,175 @@ def migrate(conn: sqlite3.Connection) -> None:
             """
         )
         conn.commit()
+
+    # Global SCTE trigger presets (Roll + panel URLs)
+    tables = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "splice_presets" not in tables:
+        conn.executescript(
+            """
+            CREATE TABLE splice_presets (
+                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug                    TEXT NOT NULL UNIQUE,
+                label                   TEXT NOT NULL,
+                sort_order              INTEGER NOT NULL DEFAULT 0,
+                enabled                 BOOLEAN NOT NULL DEFAULT 1,
+                splice_type             TEXT NOT NULL CHECK (splice_type IN (
+                                            'splice_start_immediate','splice_start_normal',
+                                            'splice_end_immediate','splice_end_normal',
+                                            'splice_cancel'
+                                        )),
+                hex_payload             TEXT,
+                auto_return             BOOLEAN NOT NULL DEFAULT 0,
+                break_duration_sec      REAL,
+                use_channel_delay       BOOLEAN NOT NULL DEFAULT 1,
+                created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO splice_presets (slug, label, sort_order, enabled, splice_type, auto_return, break_duration_sec, use_channel_delay) VALUES
+              ('roll',   'ROLL',   10, 1, 'splice_start_immediate', 0, NULL, 1),
+              ('end',    'END',    20, 1, 'splice_end_immediate',   0, NULL, 1),
+              ('cancel', 'CANCEL', 30, 1, 'splice_cancel',          0, NULL, 1),
+              ('start_normal', 'Start Normal', 40, 0, 'splice_start_normal', 0, NULL, 1),
+              ('end_normal',   'End Normal',   50, 0, 'splice_end_normal',   0, NULL, 1),
+              ('roll_30s',     'ROLL 30s auto-return', 60, 0, 'splice_start_immediate', 1, 30.0, 1);
+            """
+        )
+        conn.commit()
+
+
+SPLICE_TYPES = (
+    "splice_start_immediate",
+    "splice_start_normal",
+    "splice_end_immediate",
+    "splice_end_normal",
+    "splice_cancel",
+)
+
+
+def _slugify(raw: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "_", (raw or "").strip().lower()).strip("_")
+    return s or "preset"
+
+
+def list_splice_presets(
+    conn: sqlite3.Connection, *, enabled_only: bool = False
+) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM splice_presets"
+    if enabled_only:
+        sql += " WHERE enabled = 1"
+    sql += " ORDER BY sort_order ASC, id ASC"
+    return rows_to_dicts(conn.execute(sql).fetchall())
+
+
+def get_splice_preset(
+    conn: sqlite3.Connection,
+    *,
+    preset_id: Optional[int] = None,
+    slug: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    if preset_id is not None:
+        return row_to_dict(
+            conn.execute(
+                "SELECT * FROM splice_presets WHERE id = ?", (int(preset_id),)
+            ).fetchone()
+        )
+    if slug:
+        return row_to_dict(
+            conn.execute(
+                "SELECT * FROM splice_presets WHERE slug = ?", (str(slug).strip(),)
+            ).fetchone()
+        )
+    return None
+
+
+def upsert_splice_preset(
+    conn: sqlite3.Connection,
+    fields: dict[str, Any],
+    *,
+    preset_id: Optional[int] = None,
+) -> dict[str, Any]:
+    label = str(fields.get("label") or "").strip()
+    if not label:
+        raise ValueError("label required")
+    splice_type = str(fields.get("splice_type") or "").strip()
+    if splice_type not in SPLICE_TYPES:
+        raise ValueError(f"invalid splice_type {splice_type}")
+    slug = str(fields.get("slug") or "").strip() or _slugify(label)
+    slug = re.sub(r"[^a-z0-9_]+", "", slug.lower())
+    if not slug:
+        raise ValueError("slug required")
+    sort_order = int(fields.get("sort_order") or 0)
+    enabled = 1 if fields.get("enabled", True) else 0
+    hex_payload = fields.get("hex_payload")
+    if hex_payload is not None:
+        hex_payload = str(hex_payload).strip() or None
+    auto_return = 1 if fields.get("auto_return") else 0
+    break_duration_sec = fields.get("break_duration_sec")
+    if break_duration_sec is not None and break_duration_sec != "":
+        break_duration_sec = float(break_duration_sec)
+    else:
+        break_duration_sec = None
+    use_channel_delay = 1 if fields.get("use_channel_delay", True) else 0
+
+    if preset_id is None:
+        cur = conn.execute(
+            """
+            INSERT INTO splice_presets (
+                slug, label, sort_order, enabled, splice_type, hex_payload,
+                auto_return, break_duration_sec, use_channel_delay
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                slug,
+                label,
+                sort_order,
+                enabled,
+                splice_type,
+                hex_payload,
+                auto_return,
+                break_duration_sec,
+                use_channel_delay,
+            ),
+        )
+        preset_id = int(cur.lastrowid)
+    else:
+        conn.execute(
+            """
+            UPDATE splice_presets SET
+                slug = ?, label = ?, sort_order = ?, enabled = ?,
+                splice_type = ?, hex_payload = ?, auto_return = ?,
+                break_duration_sec = ?, use_channel_delay = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                slug,
+                label,
+                sort_order,
+                enabled,
+                splice_type,
+                hex_payload,
+                auto_return,
+                break_duration_sec,
+                use_channel_delay,
+                int(preset_id),
+            ),
+        )
+    conn.commit()
+    out = get_splice_preset(conn, preset_id=preset_id)
+    assert out is not None
+    return out
+
+
+def delete_splice_preset(conn: sqlite3.Connection, preset_id: int) -> bool:
+    cur = conn.execute("DELETE FROM splice_presets WHERE id = ?", (int(preset_id),))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def splice_udp_port_for(channel: dict[str, Any]) -> int:

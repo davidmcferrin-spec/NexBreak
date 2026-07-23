@@ -102,6 +102,53 @@
     el.innerHTML = bits.join(" ");
   }
 
+  function renderInjects(events) {
+    var el = document.getElementById("verify-injects");
+    if (!el) return;
+    events = events || [];
+    if (!events.length) {
+      el.innerHTML = '<div class="empty">No recent splice commands</div>';
+      return;
+    }
+    el.innerHTML =
+      '<table class="data"><thead><tr>' +
+      "<th>When</th><th>Channel</th><th>Type</th><th>Event</th><th>Result</th><th>Detail</th>" +
+      "</tr></thead><tbody>" +
+      events
+        .map(function (e) {
+          var ts = e.occurred_at
+            ? Date.parse(String(e.occurred_at).replace(" ", "T") + "Z") / 1000
+            : null;
+          var eidMatch = String(e.detail || "").match(/event_id=(\d+)/);
+          var eventId = eidMatch ? eidMatch[1] : "—";
+          return (
+            "<tr><td>" +
+            api.esc(ageLabel(ts)) +
+            "</td><td>" +
+            api.esc(e.processing_name || String(e.processing_channel_id || "—")) +
+            "</td><td>" +
+            api.esc(e.splice_type || "—") +
+            "</td><td>" +
+            api.esc(eventId) +
+            "</td><td>" +
+            (e.result === "success"
+              ? '<span class="badge ok">ok</span>'
+              : '<span class="badge bad">' + api.esc(e.result || "?") + "</span>") +
+            '</td><td class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
+            api.esc(String(e.detail || "").slice(0, 100)) +
+            "</td></tr>"
+          );
+        })
+        .join("") +
+      "</tbody></table>";
+  }
+
+  async function loadInjects() {
+    var r = await api.get("/v1/audit?event_type=splice_command&limit=20");
+    if (!r.ok || !r.data) return;
+    renderInjects(r.data.events || []);
+  }
+
   function renderEvents(live, sightings) {
     var el = document.getElementById("verify-events");
     var recent = (live && live.recent) || [];
@@ -190,6 +237,7 @@
     }
     renderStatus(live);
     renderEvents(live, r.data.sightings);
+    loadInjects();
   }
 
   async function loadEgresses() {
@@ -320,4 +368,6 @@
   });
 
   loadEgresses();
+  loadInjects();
+  setInterval(loadInjects, 5000);
 })();
