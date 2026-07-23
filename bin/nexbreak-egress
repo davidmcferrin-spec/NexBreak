@@ -149,6 +149,7 @@ def main() -> int:
 
         rc = 0
         restart_at = 0.0
+        backoff = 2.0
         while not _stop:
             if _proc is not None and _proc.poll() is not None:
                 code = _proc.returncode
@@ -156,7 +157,11 @@ def main() -> int:
                 if now < restart_at:
                     time.sleep(0.2)
                     continue
-                log.warning("ffmpeg exited code=%s — restarting in 2s", code)
+                log.warning(
+                    "ffmpeg exited code=%s — restarting in %.0fs",
+                    code,
+                    backoff,
+                )
                 audit(
                     conn,
                     event_type="service_crash",
@@ -164,12 +169,16 @@ def main() -> int:
                     result="failure",
                     detail=f"ffmpeg exited {code}; auto-restart",
                 )
-                restart_at = now + 2.0
-                time.sleep(2.0)
+                restart_at = now + backoff
+                time.sleep(backoff)
+                backoff = min(30.0, backoff * 1.5)
                 if _stop:
                     break
                 _proc = Popen(argv)
                 continue
+            # Healthy run — decay backoff.
+            if _proc is not None and _proc.poll() is None and backoff > 2.0:
+                backoff = 2.0
             time.sleep(0.5)
 
         _kill()

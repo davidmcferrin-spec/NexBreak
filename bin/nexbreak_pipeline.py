@@ -382,22 +382,25 @@ def ffmpeg_egress_argv(
 
     src = udp_mpegts_input_url(feed_host, feed_port, fifo_size=1000000)
     dst = build_srt_output_url(egress)
-    # Force MPEG-TS demux so ffmpeg does not try to decode (avoids PPS spam on mid-GOP join).
+    # Probe long enough to learn audio sample_rate / PMT before opening SRT.
+    # analyzeduration=0 caused: "sample rate not set" / "Could not write header".
     return [
         ffmpeg,
         "-hide_banner",
         "-loglevel", "error",
         "-nostdin",
-        "-fflags", "+genpts+discardcorrupt+nobuffer",
+        "-fflags", "+genpts+discardcorrupt",
         "-flags", "low_delay",
-        "-probesize", "32",
-        "-analyzeduration", "0",
+        "-analyzeduration", "5000000",
+        "-probesize", "5000000",
         "-f", "mpegts",
         "-i", src,
         "-map", "0",
         "-c", "copy",
         "-f", "mpegts",
         "-mpegts_flags", "+resend_headers",
+        "-muxdelay", "0",
+        "-muxpreload", "0",
         dst,
     ]
 

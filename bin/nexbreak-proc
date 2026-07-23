@@ -39,6 +39,7 @@ from nexbreak_caption_policy import (  # noqa: E402
 from nexbreak_captions import CaptionSidecar  # noqa: E402
 from nexbreak_db import (  # noqa: E402
     audit,
+    cc_udp_endpoint_for,
     connect,
     control_sock_path,
     get_processing_by_service,
@@ -310,13 +311,16 @@ def _start_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
         if not inject_path.is_file():
             raise RuntimeError(f"missing {inject_path}")
         cue = cue_sock_path(str(channel["service_name"]))
+        cc_udp = cc_udp_endpoint_for(channel)
         inj_argv = [
             sys.executable,
             str(inject_path),
             "--cue-sock",
             cue,
+            "--cc-udp",
+            cc_udp,
         ]
-        log.info("cc-inject: %s", " ".join(inj_argv))
+        log.info("cc-inject (LCE): %s", " ".join(inj_argv))
         inj = Popen(inj_argv, stdin=ff.stdout, stdout=PIPE, stderr=None)
         if ff.stdout is not None:
             ff.stdout.close()

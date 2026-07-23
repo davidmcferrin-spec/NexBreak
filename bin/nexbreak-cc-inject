@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-nexbreak-cc-inject — MPEG-TS in → H.264(+A53 CEA-608) MPEG-TS out.
+nexbreak-cc-inject — MPEG-TS in → CEA-608 captioned MPEG-TS out.
 
-Sits between ffmpeg ingest and tsp when effective_mode=asr_insert.
+Preferred path (Live Caption Encoder):
+  stdin MPEG-TS → cc_injector (libav + libx264 a53cc=1) → stdout MPEG-TS
+  Caption text arrives over UDP (--cc-udp), also bridged from the cue Unix socket
+  that nexbreak-caption-worker already uses.
 
-Architecture (deliberately simple — no named FIFOs, no dual ffmpeg outputs):
-  stdin MPEG-TS
-    → ffmpeg (decode/re-encode H.264+AAC → Annex-B on fd + AAC on fd via pass_fds)
-    → this process injects A/53 SEI into the H.264 Annex-B
-    → ffmpeg mux (H.264+AAC → MPEG-TS stdout)
+Fallback (no cc_injector binary):
+  single ffmpeg H.264+AAC remux with NO captions (keeps the program path alive).
 
-If the dual-pipe encode fails to start, falls back to a single ffmpeg
-H.264+AAC MPEG-TS remux (no SEI) so the program path stays alive.
+Install the injector:
+  sudo bash scripts/install-ubuntu.sh cc-injector
 """
 
 from __future__ import annotations
@@ -31,16 +31,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from nexbreak_cea608 import annex_b_sei_nal, cc_pair, text_to_cc_pairs  # noqa: E402
-
 log = logging.getLogger("nexbreak-cc-inject")
 _stop = False
-_caption_text = ""
-_caption_clear = True
-_caption_seq = 0
-_caption_lock = threading.Lock()
 
 
 def _handle(signum, _frame):
@@ -48,22 +40,54 @@ def _handle(signum, _frame):
     _stop = True
 
 
-def _set_caption(text: str, clear: bool, seq: int) -> None:
-    global _caption_text, _caption_clear, _caption_seq
-    with _caption_lock:
-        if seq and seq < _caption_seq:
-            return
-        _caption_seq = seq or (_caption_seq + 1)
-        _caption_text = text or ""
-        _caption_clear = bool(clear) or not _caption_text
+def find_cc_injector() -> Optional[str]:
+    env = (os.environ.get("NEXBREAK_CC_INJECTOR") or "").strip()
+    if env and os.path.isfile(env) and os.access(env, os.X_OK):
+        return env
+    which = shutil.which("cc_injector")
+    if which:
+        return which
+    # Sibling of this script when installed under /opt/nexbreak/bin
+    here = Path(__file__).resolve().parent
+    for cand in (
+        here / "cc_injector",
+        Path("/usr/local/bin/cc_injector"),
+        Path("/opt/nexbreak/bin/cc_injector"),
+    ):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
 
 
-def _get_caption() -> tuple[str, bool, int]:
-    with _caption_lock:
-        return _caption_text, _caption_clear, _caption_seq
+def parse_cc_udp(spec: str) -> tuple[str, int]:
+    spec = (spec or "").strip()
+    if not spec:
+        raise ValueError("empty --cc-udp")
+    if ":" not in spec:
+        raise ValueError(f"bad --cc-udp {spec!r} (want HOST:PORT)")
+    host, _, port_s = spec.rpartition(":")
+    host = host.strip() or "127.0.0.1"
+    return host, int(port_s)
 
 
-def cue_listener(sock_path: str) -> None:
+def send_udp_caption(sock: socket.socket, addr: tuple[str, int], text: str) -> None:
+    """LCE accepts plain ASCII lines (≤32 chars recommended)."""
+    line = (text or "").replace("\r", " ").replace("\n", " ").strip()
+    if not line:
+        return
+    # Keep one readable line for RU2; LCE truncates aggressively.
+    if len(line) > 32:
+        line = line[:31].rstrip() + "…"
+    # ASCII-ish for CEA-608
+    raw = line.encode("ascii", errors="replace") + b"\n"
+    try:
+        sock.sendto(raw, addr)
+    except OSError as exc:
+        log.debug("cc-udp send failed: %s", exc)
+
+
+def cue_to_udp_bridge(sock_path: str, udp_host: str, udp_port: int) -> None:
+    """Forward caption-worker Unix-socket cues → LCE UDP text port."""
     Path(sock_path).parent.mkdir(parents=True, exist_ok=True)
     if os.path.exists(sock_path):
         try:
@@ -75,54 +99,59 @@ def cue_listener(sock_path: str) -> None:
     srv.listen(4)
     os.chmod(sock_path, 0o660)
     srv.settimeout(1.0)
-    log.info("cue socket %s", sock_path)
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    addr = (udp_host, int(udp_port))
+    log.info("cue→udp bridge %s → %s:%s", sock_path, udp_host, udp_port)
     clients: list[socket.socket] = []
     bufmap: dict[socket.socket, bytes] = {}
+    last_sent = ""
     try:
         while not _stop:
+            rlist = [srv] + clients
             try:
-                conn, _ = srv.accept()
-                conn.setblocking(False)
-                clients.append(conn)
-                bufmap[conn] = b""
-            except socket.timeout:
-                pass
-            except OSError:
-                if _stop:
-                    break
-            if not clients:
-                continue
-            readable, _, _ = select.select(clients, [], [], 0.25)
-            for c in readable:
-                try:
-                    data = c.recv(4096)
-                except OSError:
-                    data = b""
-                if not data:
+                readable, _, _ = select.select(rlist, [], [], 0.5)
+            except (ValueError, OSError):
+                readable = []
+            for s in readable:
+                if s is srv:
                     try:
-                        c.close()
+                        conn, _ = srv.accept()
+                        conn.setblocking(False)
+                        clients.append(conn)
+                        bufmap[conn] = b""
                     except OSError:
                         pass
-                    clients = [x for x in clients if x is not c]
-                    bufmap.pop(c, None)
                     continue
-                bufmap[c] = bufmap.get(c, b"") + data
-                while b"\n" in bufmap[c]:
-                    line, bufmap[c] = bufmap[c].split(b"\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
+                try:
+                    chunk = s.recv(4096)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    try:
+                        s.close()
+                    except OSError:
+                        pass
+                    clients = [c for c in clients if c is not s]
+                    bufmap.pop(s, None)
+                    continue
+                bufmap[s] = bufmap.get(s, b"") + chunk
+                while b"\n" in bufmap[s]:
+                    line, bufmap[s] = bufmap[s].split(b"\n", 1)
                     try:
                         msg = json.loads(line.decode("utf-8", errors="replace"))
                     except json.JSONDecodeError:
                         continue
-                    _set_caption(
-                        str(msg.get("text") or ""),
-                        bool(msg.get("clear")),
-                        int(msg.get("seq") or 0),
-                    )
+                    if msg.get("clear"):
+                        text = ""
+                    else:
+                        text = str(msg.get("text") or "").strip()
+                    if text and text != last_sent:
+                        send_udp_caption(udp, addr, text)
+                        last_sent = text
+                    elif not text:
+                        last_sent = ""
     finally:
-        for c in list(clients):
+        for c in clients:
             try:
                 c.close()
             except OSError:
@@ -132,106 +161,21 @@ def cue_listener(sock_path: str) -> None:
         except OSError:
             pass
         try:
+            udp.close()
+        except OSError:
+            pass
+        try:
             os.unlink(sock_path)
         except OSError:
             pass
 
 
-def _nal_type(buf: bytes, sc: int) -> Optional[int]:
-    if sc + 4 <= len(buf) and buf[sc : sc + 3] == b"\x00\x00\x01":
-        hdr = sc + 3
-    elif sc + 5 <= len(buf) and buf[sc : sc + 4] == b"\x00\x00\x00\x01":
-        hdr = sc + 4
-    else:
-        return None
-    if hdr >= len(buf):
-        return None
-    return buf[hdr] & 0x1F
-
-
-def _iter_start_codes(buf: bytes) -> list[int]:
-    out: list[int] = []
-    i = 0
-    n = len(buf)
-    while i + 3 < n:
-        if buf[i] == 0 and buf[i + 1] == 0:
-            if buf[i + 2] == 1:
-                out.append(i)
-                i += 3
-                continue
-            if buf[i + 2] == 0 and i + 3 < n and buf[i + 3] == 1:
-                out.append(i)
-                i += 4
-                continue
-        i += 1
-    return out
-
-
-def sei_filter_fds(src_fd: int, dst_fd: int) -> None:
-    last_seq = -1
-    pairs: list = [cc_pair(0x00, 0x00)]
-    pair_i = 0
-    carry = b""
-    frames = 0
-    try:
-        while not _stop:
-            try:
-                chunk = os.read(src_fd, 65536)
-            except OSError:
-                break
-            if not chunk:
-                break
-            buf = carry + chunk
-            scs = _iter_start_codes(buf)
-            if not scs:
-                carry = buf[-3:] if len(buf) >= 3 else buf
-                if len(buf) > 3:
-                    try:
-                        os.write(dst_fd, buf[:-3])
-                    except OSError:
-                        break
-                continue
-
-            text, clear, seq = _get_caption()
-            if seq != last_seq:
-                last_seq = seq
-                pairs = text_to_cc_pairs(text, clear=clear) or [cc_pair(0x00, 0x00)]
-                pair_i = 0
-
-            out = bytearray()
-            for i, sc in enumerate(scs[:-1]):
-                end = scs[i + 1]
-                nal = buf[sc:end]
-                nt = _nal_type(buf, sc)
-                if nt is not None and nt in (1, 5):
-                    frames += 1
-                    if frames % 2 == 0:
-                        sei = annex_b_sei_nal([pairs[pair_i % len(pairs)]])
-                        pair_i += 1
-                        out.extend(sei)
-                out.extend(nal)
-            if out:
-                try:
-                    os.write(dst_fd, out)
-                except OSError:
-                    break
-            carry = buf[scs[-1] :]
-        if carry:
-            try:
-                os.write(dst_fd, carry)
-            except OSError:
-                pass
-    finally:
-        for fd in (src_fd, dst_fd):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-
-
 def run_simple(ffmpeg: str, bitrate: str) -> int:
-    """Single-process H.264+AAC remux — always keeps the TS flowing (no SEI)."""
-    log.warning("cc-inject simple mode (H.264 remux, no A53 SEI)")
+    """Remux without captions — last-resort path-alive mode."""
+    log.warning(
+        "cc-inject simple remux (NO CEA-608) — install cc_injector: "
+        "sudo bash scripts/install-ubuntu.sh cc-injector"
+    )
     proc = subprocess.Popen(
         [
             ffmpeg,
@@ -298,141 +242,76 @@ def run_simple(ffmpeg: str, bitrate: str) -> int:
     return 0
 
 
-def run_with_sei(ffmpeg: str, bitrate: str) -> int:
-    """Encode → SEI filter → mux using anonymous pipes only."""
-    raw_v_r, raw_v_w = os.pipe()
-    raw_a_r, raw_a_w = os.pipe()
-    inj_r, inj_w = os.pipe()
-
-    enc = subprocess.Popen(
-        [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-fflags",
-            "+genpts+discardcorrupt",
-            "-i",
-            "pipe:0",
-            "-map",
-            "0:v:0",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-tune",
-            "zerolatency",
-            "-profile:v",
-            "main",
-            "-pix_fmt",
-            "yuv420p",
-            "-b:v",
-            bitrate,
-            "-maxrate",
-            bitrate,
-            "-bufsize",
-            "8M",
-            "-g",
-            "30",
-            "-an",
-            "-f",
-            "h264",
-            f"pipe:{raw_v_w}",
-            "-map",
-            "0:a:0?",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            "-ac",
-            "2",
-            "-ar",
-            "48000",
-            "-vn",
-            "-f",
-            "adts",
-            f"pipe:{raw_a_w}",
-        ],
-        stdin=sys.stdin.buffer,
-        stdout=subprocess.DEVNULL,
-        stderr=None,
-        pass_fds=(raw_v_w, raw_a_w),
+def run_lce(
+    injector: str,
+    *,
+    cue_sock: str,
+    cc_udp: str,
+    bitrate: str,
+    bootstrap: bool,
+    linger_ms: int,
+) -> int:
+    host, port = parse_cc_udp(cc_udp)
+    bridge = threading.Thread(
+        target=cue_to_udp_bridge,
+        args=(cue_sock, host, port),
+        daemon=True,
+        name="cue-udp-bridge",
     )
-    os.close(raw_v_w)
-    os.close(raw_a_w)
+    bridge.start()
+    # Give the Unix socket a moment before caption-worker connects.
+    time.sleep(0.15)
 
-    threading.Thread(
-        target=sei_filter_fds, args=(raw_v_r, inj_w), daemon=True, name="sei-filter"
-    ).start()
+    argv = [
+        injector,
+        "pipe:0",
+        "pipe:1",
+        f"--cc-udp={host}:{port}",
+        "--venc=libx264",
+        f"--bootstrap={'1' if bootstrap else '0'}",
+        f"--linger_ms={int(linger_ms)}",
+    ]
+    log.info("cc-inject LCE: %s", " ".join(argv))
+    # Pass bitrate hint via env for ops; LCE uses its own encode defaults.
+    env = os.environ.copy()
+    env.setdefault("NEXBREAK_CC_INJECT_VBITRATE", bitrate)
 
-    mux = subprocess.Popen(
-        [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-fflags",
-            "+genpts",
-            "-thread_queue_size",
-            "512",
-            "-f",
-            "h264",
-            "-i",
-            f"pipe:{inj_r}",
-            "-thread_queue_size",
-            "512",
-            "-f",
-            "aac",
-            "-i",
-            f"pipe:{raw_a_r}",
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0?",
-            "-c",
-            "copy",
-            "-f",
-            "mpegts",
-            "-mpegts_flags",
-            "+resend_headers",
-            "pipe:1",
-        ],
+    proc = subprocess.Popen(
+        argv,
+        stdin=sys.stdin.buffer,
         stdout=sys.stdout.buffer,
         stderr=None,
-        pass_fds=(inj_r, raw_a_r),
+        env=env,
     )
-    os.close(inj_r)
-    os.close(raw_a_r)
-
-    log.info("cc-inject up (pipe+SEI H.264+A53)")
-    rc = 0
     try:
         while not _stop:
-            if enc.poll() is not None:
-                log.error("encode stage exited %s", enc.returncode)
-                rc = enc.returncode if enc.returncode else 1
-                break
-            if mux.poll() is not None:
-                log.error("mux stage exited %s", mux.returncode)
-                rc = mux.returncode if mux.returncode else 1
-                break
+            code = proc.poll()
+            if code is not None:
+                log.error("cc_injector exited %s", code)
+                return int(code or 0)
             time.sleep(0.2)
     finally:
         _stop = True
-        for p in (enc, mux):
-            if p and p.poll() is None:
-                p.terminate()
-                try:
-                    p.wait(timeout=3)
-                except Exception:
-                    p.kill()
-    return int(rc or 0)
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                proc.kill()
+    return 0
 
 
 def main() -> int:
     global _stop
-    parser = argparse.ArgumentParser(description="NexBreak CC inject (H.264+A53)")
+    parser = argparse.ArgumentParser(
+        description="NexBreak CC inject (Live Caption Encoder / cc_injector)"
+    )
     parser.add_argument("--cue-sock", required=True)
+    parser.add_argument(
+        "--cc-udp",
+        default=os.environ.get("NEXBREAK_CC_UDP", "127.0.0.1:22001"),
+        help="HOST:PORT for LCE caption text UDP (default 127.0.0.1:22001)",
+    )
     parser.add_argument(
         "--bitrate",
         default=os.environ.get("NEXBREAK_CC_INJECT_VBITRATE", "4000k"),
@@ -440,8 +319,21 @@ def main() -> int:
     parser.add_argument(
         "--simple",
         action="store_true",
-        default=os.environ.get("NEXBREAK_CC_INJECT_SIMPLE", "").lower() in ("1", "true", "yes"),
-        help="single ffmpeg remux (no SEI) — most reliable",
+        default=os.environ.get("NEXBREAK_CC_INJECT_SIMPLE", "").lower()
+        in ("1", "true", "yes"),
+        help="force ffmpeg remux without captions",
+    )
+    parser.add_argument(
+        "--bootstrap",
+        action="store_true",
+        default=os.environ.get("NEXBREAK_CC_BOOTSTRAP", "1").lower()
+        not in ("0", "false", "no", "off"),
+        help="LCE bootstrap 'CC ONLINE' (default on)",
+    )
+    parser.add_argument(
+        "--linger-ms",
+        type=int,
+        default=int(os.environ.get("NEXBREAK_CC_LINGER_MS", "750")),
     )
     args = parser.parse_args()
 
@@ -453,23 +345,24 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _handle)
 
     ffmpeg = shutil.which("ffmpeg") or os.environ.get("NEXBREAK_FFMPEG", "ffmpeg")
-    threading.Thread(target=cue_listener, args=(args.cue_sock,), daemon=True).start()
+    if args.simple:
+        return run_simple(ffmpeg, args.bitrate)
 
-    # Default: inject A/53 SEI so ASR text reaches the program/SRT feed.
-    # Opt out with NEXBREAK_CC_INJECT_SIMPLE=1 or --simple (remux only, no captions).
-    force_simple = args.simple or (
-        os.environ.get("NEXBREAK_CC_INJECT_SIMPLE", "").lower() in ("1", "true", "yes")
-    )
-    # Legacy opt-in still honored; default is SEI on unless SIMPLE is set.
-    sei_env = (os.environ.get("NEXBREAK_CC_INJECT_SEI") or "1").strip().lower()
-    want_sei = sei_env not in ("0", "false", "no", "off")
-    if force_simple or not want_sei:
+    injector = find_cc_injector()
+    if not injector:
         return run_simple(ffmpeg, args.bitrate)
 
     try:
-        return run_with_sei(ffmpeg, args.bitrate)
+        return run_lce(
+            injector,
+            cue_sock=args.cue_sock,
+            cc_udp=args.cc_udp,
+            bitrate=args.bitrate,
+            bootstrap=bool(args.bootstrap),
+            linger_ms=int(args.linger_ms),
+        )
     except Exception as exc:  # noqa: BLE001
-        log.exception("SEI inject failed (%s) — falling back to simple", exc)
+        log.exception("LCE inject failed (%s) — falling back to simple", exc)
         return run_simple(ffmpeg, args.bitrate)
 
 

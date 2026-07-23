@@ -21,6 +21,7 @@ from subprocess import Popen
 from typing import Any, Optional
 
 from nexbreak_caption_policy import cue_sock_path, enabled_from_policy, normalize_policy
+from nexbreak_db import cc_udp_endpoint_for
 from nexbreak_verify import asr_state_path, read_json
 
 log = logging.getLogger("nexbreak.captions")
@@ -119,6 +120,8 @@ class CaptionSidecar:
             str(int(self.channel["local_feed_port"])),
             "--cue-sock",
             cue_sock_path(str(self.channel["service_name"])),
+            "--cc-udp",
+            cc_udp_endpoint_for(self.channel),
         ]
         if self.db_path:
             argv += ["--db", self.db_path]

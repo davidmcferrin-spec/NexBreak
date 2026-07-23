@@ -94,9 +94,10 @@ sightings table (and match recent audit commands when `event_id` aligns).
 | `force_asr` | Always ASR insert (channel re-encodes to H.264+A53 while active) |
 | `off` | No ASR; source CC still preserved on remux |
 
-ASR runs as an isolated worker (Vosk). Insert uses `nexbreak-cc-inject` on the
-core path only while `effective_mode=asr_insert`. Preview **CC** is a separate
-UI overlay (`ccextractor`), not the program caption service.
+ASR runs as an isolated worker (Vosk). While `effective_mode=asr_insert`,
+`nexbreak-cc-inject` runs **Live Caption Encoder** (`cc_injector`): UDP text →
+CEA-608 A/53 side data → libx264 `a53cc=1` → MPEG-TS into tsp. Preview **CC**
+is a separate UI overlay (`ccextractor`), not the program caption service.
 
 ```bash
 # Set policy (may restart that channel's pipeline on mode flip):
@@ -106,15 +107,18 @@ curl -X POST http://127.0.0.1:8787/v1/processing/1/captioning \
 # Legacy: {"enabled":0|1} maps to off|auto
 ```
 
-Install ASR (model + `vosk` pip + systemd drop-in):
+Install ASR + the CEA-608 injector:
 
 ```bash
 sudo bash scripts/install-ubuntu.sh vosk
+sudo bash scripts/install-ubuntu.sh cc-injector
+sudo systemctl restart nexbreak-proc@1
 ```
 
-That sets `NEXBREAK_VOSK_MODEL` on `nexbreak-proc@*`. Without it the worker
-idles (clears cues) so policy/inject can still be validated. Then set caption
-policy to **Force ASR** (UI or API). Install `ccextractor` for Preview overlay.
+`vosk` sets `NEXBREAK_VOSK_MODEL` on `nexbreak-proc@*`. `cc-injector` builds
+the vendored Live Caption Encoder into `/usr/local/bin/cc_injector`. Without
+the binary, inject falls back to a caption-less remux (path stays up). Then set
+caption policy to **Force ASR**. Install `ccextractor` for Preview overlay.
 
 ## Ubuntu bring-up
 

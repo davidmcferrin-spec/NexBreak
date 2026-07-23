@@ -16,6 +16,7 @@ Usage: sudo $0 <command>
   init-db       Create SQLite schema + seed 4 demo channels
   enable        Enable controller + proc@1 + egress@1
   vosk          Download Vosk model + pip package; wire NEXBREAK_VOSK_MODEL
+  cc-injector   Build/install Live Caption Encoder (cc_injector) for CEA-608
   status        systemctl status snapshot
 
 Env overrides: NEXBREAK_PREFIX NEXBREAK_DATA NEXBREAK_LOG
@@ -240,7 +241,6 @@ cmd_vosk() {
 # Managed by scripts/install-ubuntu.sh vosk — do not hand-edit; re-run vosk to refresh.
 [Service]
 Environment=NEXBREAK_VOSK_MODEL=${model_path}
-Environment=NEXBREAK_CC_INJECT_SEI=1
 EOF
   chmod 644 "$drop_in"
   systemctl daemon-reload
@@ -277,6 +277,33 @@ PY
   echo "Then confirm: journalctl -u nexbreak-proc@1 -n 40 | grep -iE 'effective|vosk|asr'"
 }
 
+cmd_cc_injector() {
+  # Live Caption Encoder — CEA-608 via libx264 a53cc=1 (vendored under third_party/).
+  local src="$ROOT/third_party/live-caption-encoder"
+  if [[ ! -f "$src/cc_injector.cpp" ]]; then
+    echo "ERROR: missing $src/cc_injector.cpp" >&2
+    exit 1
+  fi
+  apt-get update
+  apt-get install -y \
+    g++ pkg-config make \
+    libavformat-dev libavcodec-dev libavutil-dev libswresample-dev \
+    libx264-dev
+  echo "Building cc_injector…"
+  make -C "$src" clean all
+  install -m 755 "$src/cc_injector" /usr/local/bin/cc_injector
+  # Also keep a copy next to NexBreak binaries when PREFIX is installed.
+  if [[ -d "$PREFIX/bin" ]]; then
+    install -m 755 "$src/cc_injector" "$PREFIX/bin/cc_injector"
+  fi
+  echo "Installed: $(command -v cc_injector)"
+  cc_injector 2>&1 | head -n 3 || true
+  echo
+  echo "Restart processing so asr_insert uses LCE:"
+  echo "  sudo systemctl restart 'nexbreak-proc@*'"
+  echo "Confirm: journalctl -u nexbreak-proc@1 -n 40 | grep -iE 'LCE|cc_injector|simple remux'"
+}
+
 main() {
   local cmd="${1:-}"
   case "$cmd" in
@@ -285,6 +312,7 @@ main() {
     init-db) cmd_init_db ;;
     enable) cmd_enable ;;
     vosk) cmd_vosk ;;
+    cc-injector) cmd_cc_injector ;;
     status) cmd_status ;;
     *) usage; exit 1 ;;
   esac

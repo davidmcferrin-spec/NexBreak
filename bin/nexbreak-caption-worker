@@ -138,6 +138,36 @@ def send_cue(sock: Optional[socket.socket], *, text: str, clear: bool, seq: int)
         return None
 
 
+def parse_cc_udp(spec: str) -> Optional[tuple[str, int]]:
+    spec = (spec or "").strip()
+    if not spec or ":" not in spec:
+        return None
+    host, _, port_s = spec.rpartition(":")
+    try:
+        return (host.strip() or "127.0.0.1", int(port_s))
+    except ValueError:
+        return None
+
+
+def send_cc_udp(
+    udp: Optional[socket.socket],
+    addr: Optional[tuple[str, int]],
+    text: str,
+) -> None:
+    """Direct LCE caption ingest (plain ASCII line). Cue bridge also forwards."""
+    if udp is None or addr is None:
+        return
+    line = (text or "").replace("\r", " ").replace("\n", " ").strip()
+    if not line:
+        return
+    if len(line) > 32:
+        line = line[:31].rstrip() + "…"
+    try:
+        udp.sendto(line.encode("ascii", errors="replace") + b"\n", addr)
+    except OSError:
+        pass
+
+
 def audio_tap_argv(ffmpeg: str, host: str, port: int) -> list[str]:
     src = udp_mpegts_input_url(host, int(port), fifo_size=500000)
     return [
@@ -167,6 +197,11 @@ def main() -> int:
     parser.add_argument("--db", default=None)
     parser.add_argument("--model", default=os.environ.get("NEXBREAK_VOSK_MODEL", ""))
     parser.add_argument("--cue-sock", default=None)
+    parser.add_argument(
+        "--cc-udp",
+        default=os.environ.get("NEXBREAK_CC_UDP", ""),
+        help="optional HOST:PORT for Live Caption Encoder text UDP",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -179,6 +214,11 @@ def main() -> int:
     sock_path = args.cue_sock or cue_sock_path(args.service_name)
     blacklist, lexicon = load_lists(args.db)
     model, reason = try_load_vosk(args.model or "")
+    cc_addr = parse_cc_udp(args.cc_udp or "")
+    cc_udp_sock: Optional[socket.socket] = None
+    if cc_addr:
+        cc_udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        log.info("LCE caption UDP → %s:%s", cc_addr[0], cc_addr[1])
     log.info(
         "caption worker up service=%s feed=%s:%s cues=%s — %s (blacklist=%s lexicon=%s)",
         args.service_name,
@@ -327,6 +367,8 @@ def main() -> int:
                 last_final_at = time.time()
                 seq += 1
                 cue = send_cue(cue, text=text, clear=not text, seq=seq)
+                if text:
+                    send_cc_udp(cc_udp_sock, cc_addr, text)
             else:
                 try:
                     partial = json.loads(rec.PartialResult())
@@ -338,6 +380,7 @@ def main() -> int:
                     state_name = "partial"
                     seq += 1
                     cue = send_cue(cue, text=ptext, clear=False, seq=seq)
+                    send_cc_udp(cc_udp_sock, cc_addr, ptext)
                 elif last_partial and (time.time() - last_final_at) > 8.0:
                     last_partial = ""
                     seq += 1
@@ -385,6 +428,11 @@ def main() -> int:
             seq=seq,
             audio_tap_alive=False,
         )
+        if cc_udp_sock is not None:
+            try:
+                cc_udp_sock.close()
+            except OSError:
+                pass
         log.info("caption worker exit (vosk unloaded)")
     return 0
 

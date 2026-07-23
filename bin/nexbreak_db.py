@@ -139,6 +139,20 @@ def splice_udp_port_for(channel: dict[str, Any]) -> int:
     return int(channel["local_feed_port"]) + 1000
 
 
+def cc_udp_endpoint_for(channel: dict[str, Any]) -> str:
+    """
+    HOST:PORT for Live Caption Encoder text ingest.
+    Default: 127.0.0.1:(local_feed_port + 3000) → e.g. 19001 → 22001.
+    Override with NEXBREAK_CC_UDP or channel-local env later if needed.
+    """
+    env = (os.environ.get("NEXBREAK_CC_UDP") or "").strip()
+    if env:
+        return env
+    host = "127.0.0.1"
+    port = int(channel["local_feed_port"]) + 3000
+    return f"{host}:{port}"
+
+
 def preview_path_for(channel: dict[str, Any]) -> str:
     """MediaMTX path name for WHEP preview (e.g. nb1)."""
     explicit = (channel.get("preview_path") or "").strip()
