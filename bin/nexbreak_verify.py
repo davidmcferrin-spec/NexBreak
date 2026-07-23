@@ -93,9 +93,38 @@ def resolve_tap(
     processing: Optional[dict[str, Any]],
 ) -> dict[str, Any]:
     """
-    Pick SRT return (listener egress) or post-splice local feed (push egress).
+    Pick a tap source for SCTE verify.
+
+    Prefer the routed post-splice local MPEG-TS feed when available: same TS
+    tables egress remuxes, and it does not steal the live SRT client slot
+    (SRT listener is typically one-caller).
+
+    Fall back to calling into our SRT listener only when there is no routed
+    processing source.
     """
     mode = (egress.get("srt_mode") or "listener").lower()
+
+    if processing is not None:
+        host = processing.get("local_feed_host") or "127.0.0.1"
+        port = int(processing["local_feed_port"])
+        dest = resolve_local_feed_host(host)
+        url = udp_mpegts_input_url(host, port)
+        note = ""
+        if egress.get("output_type") == "srt" and mode == "listener":
+            note = (
+                " (post-splice feed — same TS as SRT remux; "
+                "avoids fighting the live SRT client)"
+            )
+        return {
+            "ok": True,
+            "tap_kind": "feed",
+            "tap_url": url,
+            "label": f"post-splice feed {dest}:{port}{note}",
+            "feed_host": host,
+            "feed_port": port,
+            "feed_dest": dest,
+        }
+
     if egress.get("output_type") == "srt" and mode == "listener":
         port = egress.get("srt_listen_port")
         if not port:
@@ -108,28 +137,15 @@ def resolve_tap(
             "ok": True,
             "tap_kind": "srt",
             "tap_url": url,
-            "label": f"SRT return :{int(port)} (caller into our listener)",
+            "label": (
+                f"SRT return :{int(port)} (caller into our listener — "
+                "fails if another client already holds the session)"
+            ),
         }
-    if processing is None:
-        return {
-            "ok": False,
-            "error": "egress is push mode and has no routed processing source",
-        }
-    host = processing.get("local_feed_host") or "127.0.0.1"
-    port = int(processing["local_feed_port"])
-    dest = resolve_local_feed_host(host)
-    url = udp_mpegts_input_url(host, port)
+
     return {
-        "ok": True,
-        "tap_kind": "feed",
-        "tap_url": url,
-        "label": (
-            f"post-splice feed {dest}:{port} "
-            f"(egress is {mode} push — cannot pull SRT return)"
-        ),
-        "feed_host": host,
-        "feed_port": port,
-        "feed_dest": dest,
+        "ok": False,
+        "error": "egress is push mode and has no routed processing source",
     }
 
 

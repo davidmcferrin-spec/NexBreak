@@ -2,12 +2,12 @@
 """
 nexbreak-scte-watch — return-feed SCTE-35 monitor for one egress.
 
-Tap rule:
-  srt listener egress → srt://127.0.0.1:<port>?mode=caller
-  caller/rendezvous   → routed processing local MPEG-TS UDP feed
+Tap rule (see nexbreak_verify.resolve_tap):
+  Prefer routed post-splice local MPEG-TS feed (reliable; no SRT client fight).
+  Fall back to srt://127.0.0.1:<port>?mode=caller when no processing is routed.
 
 Pipeline: ffmpeg (copy) | tsp -P tables --tid 0xFC → parse → JSON + SQLite.
-Spawned on-demand by nexbreak-controller (Verify page). Stdlib only.
+Spawned on-demand by nexbreak-verify (Verify page). Stdlib only.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from nexbreak_db import connect, migrate  # noqa: E402
 from nexbreak_verify import (  # noqa: E402
     atomic_write_json,
     empty_scte_state,
+    scte_dir,
     scte_pid_path,
     scte_state_path,
 )
@@ -223,9 +224,18 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _handle)
 
     eid = int(args.egress_id)
+    try:
+        scte_dir(create=True)
+    except OSError as exc:
+        log.error("cannot create SCTE state dir: %s", exc)
+        return 1
     pid_path = scte_pid_path(eid)
     state_path = scte_state_path(eid)
-    pid_path.write_text(str(os.getpid()) + "\n", encoding="utf-8")
+    try:
+        pid_path.write_text(str(os.getpid()) + "\n", encoding="utf-8")
+    except OSError as exc:
+        log.error("cannot write pid file %s: %s", pid_path, exc)
+        return 1
 
     ffmpeg = shutil.which("ffmpeg") or os.environ.get("NEXBREAK_FFMPEG", "ffmpeg")
     tsp = shutil.which("tsp") or os.environ.get("NEXBREAK_TSP", "tsp")
