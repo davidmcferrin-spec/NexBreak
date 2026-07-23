@@ -314,10 +314,10 @@
   }
 
   async function load() {
+    // Paint channel tables from controller first; overlay unit pills when ops returns.
     var [proc, egr] = await Promise.all([
       api.get("/v1/processing"),
       api.get("/v1/egress"),
-      fetchUnitStatus(),
     ]);
     if (!proc.ok) {
       document.getElementById("proc-list").innerHTML =
@@ -329,6 +329,10 @@
     renderList(document.getElementById("proc-list"), lastProc, "proc");
     renderList(document.getElementById("egr-list"), lastEgr, "egr");
     updateProcSummary();
+    fetchUnitStatus().then(function () {
+      renderList(document.getElementById("proc-list"), lastProc, "proc");
+      renderList(document.getElementById("egr-list"), lastEgr, "egr");
+    });
   }
 
   document.getElementById("btn-proc-cancel").addEventListener("click", function () {

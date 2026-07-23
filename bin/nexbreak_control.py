@@ -61,5 +61,5 @@ def send_caption_set(
     return proc_request(sock_path, body, timeout=timeout)
 
 
-def send_caption_status(sock_path: str, timeout: float = 5.0) -> dict[str, Any]:
+def send_caption_status(sock_path: str, timeout: float = 1.5) -> dict[str, Any]:
     return proc_request(sock_path, {"cmd": "caption_status"}, timeout=timeout)

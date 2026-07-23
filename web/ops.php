@@ -45,12 +45,16 @@ function unit_enable_allowed(string $unit): bool
     return (bool) preg_match('/^(nexbreak-proc@[0-9]|nexbreak-egress@[0-9])$/', $unit);
 }
 
-function parse_unit_status(string $stdout): array
+function parse_unit_status_line(string $line): ?array
 {
-    $parts = preg_split('/\s+/', trim($stdout), 2);
+    $parts = preg_split('/\s+/', trim($line));
+    if ($parts === false || count($parts) < 3) {
+        return null;
+    }
     return [
-        'state' => $parts[0] ?? 'unknown',
-        'enabled' => $parts[1] ?? 'unknown',
+        'unit' => $parts[0],
+        'state' => $parts[1],
+        'enabled' => $parts[2],
     ];
 }
 
@@ -81,6 +85,17 @@ function sudo_run(array $argv, ?string $stdin = null): array
     return ['code' => $code, 'stdout' => (string) $stdout, 'stderr' => (string) $stderr];
 }
 
+/** Fixed ops inventory — no controller round-trip (keeps Services snappy). */
+function list_ops_units(): array
+{
+    $units = ['nexbreak-controller', 'nexbreak-mediamtx'];
+    for ($i = 1; $i <= 4; $i++) {
+        $units[] = "nexbreak-proc@{$i}";
+        $units[] = "nexbreak-egress@{$i}";
+    }
+    return $units;
+}
+
 function controller_get(string $path): ?array
 {
     $url = 'http://127.0.0.1:8787' . $path;
@@ -109,7 +124,7 @@ function controller_get(string $path): ?array
     return is_array($data) ? $data : null;
 }
 
-/** Channel template instances from controller DB (service_name → @N). */
+/** Channel template instances from controller DB (for restart_channels only). */
 function list_channel_units(): array
 {
     $units = [];
@@ -132,13 +147,44 @@ function list_channel_units(): array
         }
     }
     if ($units === []) {
-        // Controller down — fall back to v1 slots 1–4.
         for ($i = 1; $i <= 4; $i++) {
             $units[] = "nexbreak-proc@{$i}";
             $units[] = "nexbreak-egress@{$i}";
         }
     }
     return $units;
+}
+
+function batch_unit_status(array $units): array
+{
+    if ($units === []) {
+        return [];
+    }
+    $argv = array_merge(['/usr/local/bin/nexbreak-ops-status.sh'], array_values($units));
+    $r = sudo_run($argv);
+    $byUnit = [];
+    foreach (preg_split("/\r\n|\n|\r/", trim($r['stdout'])) as $line) {
+        if ($line === '') {
+            continue;
+        }
+        $st = parse_unit_status_line($line);
+        if ($st === null) {
+            continue;
+        }
+        $byUnit[$st['unit']] = $st;
+    }
+    $items = [];
+    foreach ($units as $unit) {
+        $st = $byUnit[$unit] ?? ['unit' => $unit, 'state' => 'unknown', 'enabled' => 'unknown'];
+        $items[] = [
+            'unit' => $unit,
+            'state' => $st['state'],
+            'enabled' => $st['enabled'],
+            'can_toggle' => unit_enable_allowed($unit),
+            'ok' => ($st['state'] === 'active'),
+        ];
+    }
+    return $items;
 }
 
 header('Content-Type: application/json');
@@ -151,33 +197,7 @@ if (!is_string($action) || $action === '') {
 }
 
 if ($action === 'services') {
-    $units = array_merge(
-        ['nexbreak-controller', 'nexbreak-mediamtx'],
-        list_channel_units()
-    );
-    // Dedupe while preserving order
-    $seen = [];
-    $ordered = [];
-    foreach ($units as $u) {
-        if (isset($seen[$u])) {
-            continue;
-        }
-        $seen[$u] = true;
-        $ordered[] = $u;
-    }
-    $items = [];
-    foreach ($ordered as $unit) {
-        $r = sudo_run(['/usr/local/bin/nexbreak-ops-status.sh', $unit]);
-        $st = parse_unit_status($r['stdout']);
-        $items[] = [
-            'unit' => $unit,
-            'state' => $st['state'],
-            'enabled' => $st['enabled'],
-            'can_toggle' => unit_enable_allowed($unit),
-            'ok' => ($st['state'] === 'active'),
-        ];
-    }
-    echo json_encode(['ok' => true, 'services' => $items]);
+    echo json_encode(['ok' => true, 'services' => batch_unit_status(list_ops_units())]);
     exit;
 }
 
@@ -236,12 +256,11 @@ if ($action === 'restart') {
 
 if ($action === 'restart_channels') {
     // Restart every enabled proc/egress instance (not controller/mediamtx).
+    $channelUnits = list_channel_units();
     $targets = [];
-    foreach (list_channel_units() as $unit) {
-        $r = sudo_run(['/usr/local/bin/nexbreak-ops-status.sh', $unit]);
-        $st = parse_unit_status($r['stdout']);
-        if ($st['enabled'] === 'enabled') {
-            $targets[] = $unit;
+    foreach (batch_unit_status($channelUnits) as $st) {
+        if (($st['enabled'] ?? '') === 'enabled') {
+            $targets[] = $st['unit'];
         }
     }
     if ($targets === []) {

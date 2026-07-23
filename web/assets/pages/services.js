@@ -13,6 +13,8 @@
   var lastLine = "";
   var sinceCursor = "";
   var lastServices = [];
+  var servicesInFlight = false;
+  var journalInFlight = false;
 
   async function api(action, body) {
     var opts = body
@@ -74,6 +76,8 @@
   }
 
   async function refreshServices() {
+    if (servicesInFlight) return;
+    servicesInFlight = true;
     try {
       var data = await api("services");
       lastServices = data.services || [];
@@ -107,6 +111,8 @@
       statusEl.textContent = "status error: " + err.message;
       listEl.innerHTML =
         '<div class="empty">Ops helpers missing? Run install (sudoers + /usr/local/bin/nexbreak-ops-*.sh)</div>';
+    } finally {
+      servicesInFlight = false;
     }
   }
 
@@ -138,7 +144,8 @@
   }
 
   async function pollJournal(full) {
-    if (!selected) return;
+    if (!selected || journalInFlight) return;
+    journalInFlight = true;
     try {
       var stick = full || nearBottom();
       var body = { unit: selected, lines: full || !sinceCursor ? 150 : 80 };
@@ -171,6 +178,8 @@
       statusEl.textContent = selected + " · updated " + new Date().toLocaleTimeString();
     } catch (err) {
       statusEl.textContent = "journal error: " + err.message;
+    } finally {
+      journalInFlight = false;
     }
   }
 
@@ -253,7 +262,9 @@
 
   setInterval(function () {
     refreshServices();
+  }, 5000);
+  setInterval(function () {
     if (follow && selected) pollJournal(false);
-  }, 3000);
+  }, 2500);
   refreshServices();
 })();

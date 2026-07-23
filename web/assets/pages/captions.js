@@ -14,35 +14,18 @@
     return Number(ch.captioning_enabled) ? "auto" : "off";
   }
 
-  async function loadChannels() {
+  function renderTable(channels, statusById) {
     var el = document.getElementById("cap-channels");
-    var res = await api.get("/v1/processing");
-    if (!res.ok || !res.data) {
-      el.innerHTML = '<div class="empty">Controller unreachable</div>';
-      return;
-    }
-    var channels = res.data.channels || [];
-    if (!channels.length) {
-      el.innerHTML = '<div class="empty">No processing channels</div>';
-      return;
-    }
-
-    var statuses = await Promise.all(
-      channels.map(function (c) {
-        return api.get("/v1/processing/" + c.id + "/captioning").then(function (r) {
-          return { id: c.id, ch: c, data: r.data };
-        });
-      })
-    );
-
+    statusById = statusById || {};
     el.innerHTML =
       '<table class="data"><thead><tr>' +
       "<th>Channel</th><th>Policy</th><th>Effective</th><th>Source CC</th><th>ASR</th><th></th>" +
       "</tr></thead><tbody>" +
-      statuses
-        .map(function (s) {
-          var rt = (s.data && s.data.runtime) || {};
-          var policy = policyOf(s.ch, s.data);
+      channels
+        .map(function (ch) {
+          var data = statusById[ch.id] || null;
+          var rt = (data && data.runtime) || {};
+          var policy = policyOf(ch, data);
           var effective = rt.effective_mode || "—";
           var src =
             rt.source_has_cc == null ? "—" : rt.source_has_cc ? "yes" : "no";
@@ -60,12 +43,12 @@
           }).join("");
           return (
             "<tr><td><strong>" +
-            api.esc(s.ch.name) +
+            api.esc(ch.name) +
             '</strong> <span class="muted">@' +
-            api.esc(s.ch.service_name) +
+            api.esc(ch.service_name) +
             "</span></td><td>" +
             '<select data-policy-for="' +
-            s.id +
+            ch.id +
             '">' +
             opts +
             "</select></td><td>" +
@@ -77,7 +60,7 @@
               ? '<span class="badge ok">running</span>'
               : '<span class="badge dim">stopped</span>') +
             '</td><td><button type="button" class="primary" data-apply="' +
-            s.id +
+            ch.id +
             '">Apply</button></td></tr>'
           );
         })
@@ -106,6 +89,36 @@
         loadChannels();
       });
     });
+  }
+
+  async function loadChannels() {
+    var el = document.getElementById("cap-channels");
+    var res = await api.get("/v1/processing");
+    if (!res.ok || !res.data) {
+      el.innerHTML = '<div class="empty">Controller unreachable</div>';
+      return;
+    }
+    var channels = res.data.channels || [];
+    if (!channels.length) {
+      el.innerHTML = '<div class="empty">No processing channels</div>';
+      return;
+    }
+
+    // First paint from DB (fast); enrich runtime in background.
+    renderTable(channels, {});
+
+    var statuses = await Promise.all(
+      channels.map(function (c) {
+        return api.get("/v1/processing/" + c.id + "/captioning").then(function (r) {
+          return { id: c.id, data: r.data };
+        });
+      })
+    );
+    var byId = {};
+    statuses.forEach(function (s) {
+      byId[s.id] = s.data;
+    });
+    renderTable(channels, byId);
   }
 
   async function loadLex() {
