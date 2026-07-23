@@ -141,18 +141,28 @@ def main() -> int:
         )
 
         rc = 0
+        restart_at = 0.0
         while not _stop:
-            if _proc.poll() is not None:
-                log.error("ffmpeg exited code=%s", _proc.returncode)
+            if _proc is not None and _proc.poll() is not None:
+                code = _proc.returncode
+                now = time.time()
+                if now < restart_at:
+                    time.sleep(0.2)
+                    continue
+                log.warning("ffmpeg exited code=%s — restarting in 2s", code)
                 audit(
                     conn,
                     event_type="service_crash",
                     egress_channel_id=channel["id"],
                     result="failure",
-                    detail=f"ffmpeg exited {_proc.returncode}",
+                    detail=f"ffmpeg exited {code}; auto-restart",
                 )
-                rc = 1
-                break
+                restart_at = now + 2.0
+                time.sleep(2.0)
+                if _stop:
+                    break
+                _proc = Popen(argv)
+                continue
             time.sleep(0.5)
 
         _kill()

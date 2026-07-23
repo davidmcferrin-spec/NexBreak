@@ -160,7 +160,8 @@ def _start_preview(channel: dict[str, Any], ffmpeg: str) -> None:
         preview_path=path,
     )
     log.info("preview: %s", " ".join(_preview_argv))
-    time.sleep(1.5)
+    # Wait for local feed to carry PAT/PMT + a keyframe before attaching.
+    time.sleep(2.5)
     _preview = Popen(_preview_argv)
 
 

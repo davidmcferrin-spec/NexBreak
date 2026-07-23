@@ -48,22 +48,29 @@ def effective_mode(policy: str, source_has_cc: bool, *, asr_available: Optional[
     off         → off (no ASR; remux may still carry source CC)
     auto+has_cc → preserve
     auto+!cc    → asr_insert only if Vosk model is configured; else preserve
-    force_asr   → asr_insert
+    force_asr   → asr_insert only if Vosk model is configured; else preserve
+                 (re-encode without a model produces no captions and breaks HEVC copy)
     """
     p = normalize_policy(policy)
     if p == "off":
         return "off"
+    if asr_available is None:
+        asr_available = vosk_ready()
     if p == "force_asr":
+        if not asr_available:
+            log.warning(
+                "force_asr requested but NEXBREAK_VOSK_MODEL unset/missing — "
+                "preserving remux (install model to enable H.264+CC insert)"
+            )
+            return "preserve"
         return "asr_insert"
     # auto
     if source_has_cc:
         return "preserve"
-    if asr_available is None:
-        asr_available = vosk_ready()
     if not asr_available:
         log.info(
             "auto policy, no source CC, but NEXBREAK_VOSK_MODEL unset/missing — "
-            "preserving remux (set model or Force ASR to enable inject)"
+            "preserving remux (set model or Force ASR once model is installed)"
         )
         return "preserve"
     return "asr_insert"

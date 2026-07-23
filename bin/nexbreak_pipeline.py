@@ -226,9 +226,11 @@ def ffmpeg_preview_argv(
         "-hide_banner",
         "-loglevel", "error",
         "-nostdin",
-        "-fflags", "+genpts+discardcorrupt",
-        "-analyzeduration", "3000000",
-        "-probesize", "2000000",
+        "-fflags", "+genpts+discardcorrupt+nobuffer",
+        "-flags", "low_delay",
+        "-analyzeduration", "5000000",
+        "-probesize", "3000000",
+        "-f", "mpegts",
         "-i", src,
         "-map", "0:v:0?",
         "-map", "0:a:0?",
@@ -317,15 +319,22 @@ def ffmpeg_egress_argv(
 
     src = f"udp://{feed_host}:{int(feed_port)}?reuse=1&fifo_size=1000000&overrun_nonfatal=1"
     dst = build_srt_output_url(egress)
+    # Force MPEG-TS demux so ffmpeg does not try to decode (avoids PPS spam on mid-GOP join).
     return [
         ffmpeg,
         "-hide_banner",
-        "-loglevel", "warning",
+        "-loglevel", "error",
         "-nostdin",
-        "-fflags", "+genpts",
+        "-fflags", "+genpts+discardcorrupt+nobuffer",
+        "-flags", "low_delay",
+        "-probesize", "32",
+        "-analyzeduration", "0",
+        "-f", "mpegts",
         "-i", src,
+        "-map", "0",
         "-c", "copy",
         "-f", "mpegts",
+        "-mpegts_flags", "+resend_headers",
         dst,
     ]
 
