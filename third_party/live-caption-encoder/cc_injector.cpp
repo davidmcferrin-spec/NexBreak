@@ -285,23 +285,6 @@ static int64_t parse_bitrate_string(const char* s) {
 }
 
 // ======================================================================================
-// Audio layout helpers (FFmpeg version-guarded)
-// ======================================================================================
-
-static void set_audio_layout_from_decoder(AVCodecContext* aencCtx, const AVCodecContext* adecCtx) {
-#if LIBAVCODEC_VERSION_MAJOR >= 59
-    if (adecCtx->ch_layout.nb_channels > 0) {
-        av_channel_layout_copy(&aencCtx->ch_layout, &adecCtx->ch_layout);
-    } else {
-        av_channel_layout_default(&aencCtx->ch_layout, 2); // stereo
-    }
-#else
-    aencCtx->channels       = adecCtx->channels ? adecCtx->channels : 2;
-    aencCtx->channel_layout = adecCtx->channel_layout ? adecCtx->channel_layout : AV_CH_LAYOUT_STEREO;
-#endif
-}
-
-// ======================================================================================
 // Main
 // ======================================================================================
 
@@ -471,7 +454,6 @@ int main(int argc, char** argv)
     RollUp2State ru2{};
     bool caption_pending = false;
     std::string current_caption;
-    std::string prev_caption;
     std::string curr_caption;
     std::string last_udp_line;
 
@@ -519,7 +501,6 @@ int main(int argc, char** argv)
 
                     std::vector<uint8_t> cc;
                     bool do_inject = false;
-                    bool do_repaint = false;
                     bool do_roll = false;
 
                     // Inject ONLY when a new caption event arrives — never every frame.
@@ -529,10 +510,8 @@ int main(int argc, char** argv)
 
                         if (!ru2.started && curr_caption.empty()) {
                             curr_caption = current_caption;
-                            do_repaint = true;
-                            do_inject = true;
+                            do_inject = true; // first paint (no roll)
                         } else if (current_caption != curr_caption) {
-                            prev_caption = curr_caption;
                             curr_caption = current_caption;
                             do_roll = true;
                             do_inject = true;
