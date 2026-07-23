@@ -1,6 +1,7 @@
 "use strict";
 (function () {
   var api = window.NexBreakAPI;
+  var VIEW_LIMIT = 80;
   var items = [];
   var selectedId = null;
   var listening = false;
@@ -164,10 +165,39 @@
     if (el) el.textContent = text;
   }
 
+  function injectOccurredTs(e) {
+    if (!e || !e.occurred_at) return 0;
+    var t = Date.parse(String(e.occurred_at).replace(" ", "T") + "Z");
+    return Number.isFinite(t) ? t / 1000 : 0;
+  }
+
+  function trimNewest(rows, limit) {
+    var list = (rows || []).slice();
+    if (list.length > limit) list = list.slice(0, limit);
+    return list;
+  }
+
+  function scrollPreserve(el, fn) {
+    if (!el) {
+      fn();
+      return;
+    }
+    var prev = el.scrollTop;
+    var stickTop = prev < 48;
+    fn();
+    // Newest rows are at the top — stay pinned there while watching.
+    el.scrollTop = stickTop ? 0 : prev;
+  }
+
   function renderInjects(events, matchedIds) {
     var el = document.getElementById("verify-injects");
     if (!el) return;
-    events = events || [];
+    events = trimNewest(
+      (events || []).slice().sort(function (a, b) {
+        return injectOccurredTs(b) - injectOccurredTs(a);
+      }),
+      VIEW_LIMIT
+    );
     matchedIds = matchedIds || {};
     var sig = events
       .map(function (e) {
@@ -194,43 +224,43 @@
       return;
     }
 
-    el.innerHTML =
-      '<table class="data"><thead><tr>' +
-      "<th>When</th><th>Event</th><th>Type</th><th>Result</th><th>Channel</th>" +
-      "</tr></thead><tbody>" +
-      events
-        .map(function (e) {
-          var ts = e.occurred_at
-            ? Date.parse(String(e.occurred_at).replace(" ", "T") + "Z") / 1000
-            : null;
-          var eidMatch = String(e.detail || "").match(/event_id=(\d+)/);
-          var eventId = eidMatch ? eidMatch[1] : "";
-          var matched = eventId && matchedIds[eventId];
-          var rowClass = matched ? " verify-matched" : "";
-          return (
-            '<tr class="' +
-            rowClass.trim() +
-            '"' +
-            (eventId ? ' data-event-id="' + api.esc(eventId) + '"' : "") +
-            "><td>" +
-            api.esc(ageLabel(ts)) +
-            "</td><td>" +
-            api.esc(eventId || "—") +
-            "</td><td>" +
-            api.esc(e.splice_type || "—") +
-            "</td><td>" +
-            (e.result === "success"
-              ? '<span class="badge ok">ok</span>'
-              : '<span class="badge bad">' + api.esc(e.result || "?") + "</span>") +
-            '</td><td class="clip muted">' +
-            api.esc(e.processing_name || String(e.processing_channel_id || "—")) +
-            "</td></tr>"
-          );
-        })
-        .join("") +
-      "</tbody></table>";
-    bindFocusRows(el);
-    paintFocus();
+    scrollPreserve(el, function () {
+      el.innerHTML =
+        '<table class="data"><thead><tr>' +
+        "<th>When</th><th>Event</th><th>Type</th><th>Result</th><th>Channel</th>" +
+        "</tr></thead><tbody>" +
+        events
+          .map(function (e) {
+            var ts = injectOccurredTs(e) || null;
+            var eidMatch = String(e.detail || "").match(/event_id=(\d+)/);
+            var eventId = eidMatch ? eidMatch[1] : "";
+            var matched = eventId && matchedIds[eventId];
+            var rowClass = matched ? " verify-matched" : "";
+            return (
+              '<tr class="' +
+              rowClass.trim() +
+              '"' +
+              (eventId ? ' data-event-id="' + api.esc(eventId) + '"' : "") +
+              "><td>" +
+              api.esc(ageLabel(ts)) +
+              "</td><td>" +
+              api.esc(eventId || "—") +
+              "</td><td>" +
+              api.esc(e.splice_type || "—") +
+              "</td><td>" +
+              (e.result === "success"
+                ? '<span class="badge ok">ok</span>'
+                : '<span class="badge bad">' + api.esc(e.result || "?") + "</span>") +
+              '</td><td class="clip muted">' +
+              api.esc(e.processing_name || String(e.processing_channel_id || "—")) +
+              "</td></tr>"
+            );
+          })
+          .join("") +
+        "</tbody></table>";
+      bindFocusRows(el);
+      paintFocus();
+    });
   }
 
   function normalizeSightings(live, sightings) {
@@ -254,7 +284,7 @@
     recent = recent.slice().sort(function (a, b) {
       return Number(b.ts || 0) - Number(a.ts || 0);
     });
-    return recent;
+    return trimNewest(recent, VIEW_LIMIT);
   }
 
   function renderEvents(live, sightings, matchedIds) {
@@ -279,45 +309,47 @@
       return;
     }
 
-    el.innerHTML =
-      '<table class="data"><thead><tr>' +
-      "<th>When</th><th>Event</th><th>Type</th><th>OON</th><th>Match</th>" +
-      "</tr></thead><tbody>" +
-      recent
-        .map(function (e) {
-          var eid = eventKey(e.event_id);
-          var oon =
-            e.out_of_network === true
-              ? "yes"
-              : e.out_of_network === false
-                ? "no"
-                : "—";
-          var matched = (eid && matchedIds[eid]) || !!e.verified;
-          var rowClass = matched ? " verify-matched" : "";
-          return (
-            '<tr class="' +
-            rowClass.trim() +
-            '"' +
-            (eid ? ' data-event-id="' + api.esc(eid) + '"' : "") +
-            "><td>" +
-            api.esc(ageLabel(e.ts)) +
-            "</td><td>" +
-            api.esc(eid || "—") +
-            "</td><td>" +
-            api.esc(String(e.splice_type || "—")) +
-            "</td><td>" +
-            api.esc(oon) +
-            "</td><td>" +
-            (matched
-              ? '<span class="badge ok">sent</span>'
-              : '<span class="badge dim">—</span>') +
-            "</td></tr>"
-          );
-        })
-        .join("") +
-      "</tbody></table>";
-    bindFocusRows(el);
-    paintFocus();
+    scrollPreserve(el, function () {
+      el.innerHTML =
+        '<table class="data"><thead><tr>' +
+        "<th>When</th><th>Event</th><th>Type</th><th>OON</th><th>Match</th>" +
+        "</tr></thead><tbody>" +
+        recent
+          .map(function (e) {
+            var eid = eventKey(e.event_id);
+            var oon =
+              e.out_of_network === true
+                ? "yes"
+                : e.out_of_network === false
+                  ? "no"
+                  : "—";
+            var matched = (eid && matchedIds[eid]) || !!e.verified;
+            var rowClass = matched ? " verify-matched" : "";
+            return (
+              '<tr class="' +
+              rowClass.trim() +
+              '"' +
+              (eid ? ' data-event-id="' + api.esc(eid) + '"' : "") +
+              "><td>" +
+              api.esc(ageLabel(e.ts)) +
+              "</td><td>" +
+              api.esc(eid || "—") +
+              "</td><td>" +
+              api.esc(String(e.splice_type || "—")) +
+              "</td><td>" +
+              api.esc(oon) +
+              "</td><td>" +
+              (matched
+                ? '<span class="badge ok">sent</span>'
+                : '<span class="badge dim">—</span>') +
+              "</td></tr>"
+            );
+          })
+          .join("") +
+        "</tbody></table>";
+      bindFocusRows(el);
+      paintFocus();
+    });
   }
 
   function matchMapFrom(injects, sightings) {
@@ -364,7 +396,7 @@
   }
 
   async function loadInjects() {
-    var q = "/v1/audit?event_type=splice_command&limit=40";
+    var q = "/v1/audit?event_type=splice_command&limit=80";
     var pcid = routedProcId();
     if (pcid) q += "&processing_channel_id=" + encodeURIComponent(String(pcid));
     var r = await api.get(q);

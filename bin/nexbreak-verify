@@ -283,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
                             SELECT * FROM scte_sightings
                             WHERE egress_channel_id = ?
                             ORDER BY id DESC
-                            LIMIT 40
+                            LIMIT 80
                             """,
                             (eid,),
                         ).fetchall()

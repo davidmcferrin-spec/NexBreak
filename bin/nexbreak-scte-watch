@@ -53,7 +53,7 @@ from nexbreak_verify import (  # noqa: E402
 log = logging.getLogger("nexbreak-scte-watch")
 _stop = False
 
-RECENT_MAX = 40
+RECENT_MAX = 80
 SCTE_MARKER = "##scte##"
 
 
