@@ -171,6 +171,22 @@ Done:
     into the local feed when ASR is required; Vosk sidecar + cc-inject
 - `nexbreak-egress`: UDP local feed → SRT (tsp) or HLS origin_pull (ffmpeg →
   `/var/lib/nexbreak/hls/<svc>/`, Apache `/hls/`)
+- SCTE insertion visibility (2026-07-23): tsp now runs `--verbose` with an
+ in-chain `-P splicemonitor --json-line=##splicemon##` between spliceinject
+ and the null filter (lossless insertion proof; splice_null keepalives emit
+ nothing → no noise). `nexbreak-proc` drains tsp stderr into structured
+ state — spliceinject lifecycle counters (received/enqueued/injected/
+ dropped) + splicemonitor events — at `/run/nexbreak/splicemon/<svc>.json`,
+ in the proc `status` reply (`splice_monitor`), and via controller
+ `GET /v1/processing/<id>/splicemon`. Verify page shows an "Insertion
+ engine" panel from it. Roll/splice commands are now sent 3× (150ms apart,
+ `NEXBREAK_SPLICE_SEND_COUNT`/`_GAP_MS`) because spliceinject injects
+ immediate inserts exactly once (one TS packet; `--inject-count` only
+ applies to pts_time commands). Key spliceinject facts (verified in TSDuck
+ source): nothing is injected — keepalives included — before PTS lock on
+ the service video/PCR PID, and only null packets are replaced (hence
+ `--add-input-stuffing 1/8`). Env gates: `NEXBREAK_TSP_VERBOSE=0`,
+ `NEXBREAK_SPLICEMON=0`.
 - `web/` UI: Dashboard, Roll (with live preview + CC overlay + policy cycle), Preview,
   Channels (processing + egress editors; Copy URL for SRT listener / HLS M3U8), Router, Captions, Verify, Services
   (systemd/journal via allowlisted sudo wrappers — no controller), Metrics (host

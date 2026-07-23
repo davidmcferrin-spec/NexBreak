@@ -35,7 +35,7 @@ from nexbreak_db import (  # noqa: E402
     rows_to_dicts,
     upsert_splice_preset,
 )
-from nexbreak_pipeline import enrich_channel_bitrate  # noqa: E402
+from nexbreak_pipeline import enrich_channel_bitrate, read_splicemon_state  # noqa: E402
 from nexbreak_control import send_caption_set, send_caption_status, send_splice  # noqa: E402
 from nexbreak_host import host_snapshot  # noqa: E402
 
@@ -340,6 +340,30 @@ class Handler(BaseHTTPRequestHandler):
                 ch = row_to_dict(row)
                 assert ch is not None
                 self._send(200, {"ok": True, "channel": enrich_channel_bitrate(ch)})
+                return
+
+            if path.startswith("/v1/processing/") and path.endswith("/splicemon"):
+                # In-chain splice insertion state written by nexbreak-proc
+                # (tsp --verbose spliceinject lifecycle + splicemonitor events).
+                cid = int(path.split("/")[3])
+                row = conn.execute(
+                    "SELECT * FROM processing_channels WHERE id = ?", (cid,)
+                ).fetchone()
+                if not row:
+                    self._send(404, {"ok": False, "error": "not found"})
+                    return
+                ch = row_to_dict(row)
+                assert ch is not None
+                state = read_splicemon_state(str(ch["service_name"])) or {}
+                self._send(
+                    200,
+                    {
+                        "ok": True,
+                        "channel_id": cid,
+                        "service_name": ch["service_name"],
+                        "splicemon": state,
+                    },
+                )
                 return
 
             if path.startswith("/v1/processing/") and path.endswith("/captioning"):

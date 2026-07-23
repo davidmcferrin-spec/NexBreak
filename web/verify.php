@@ -30,6 +30,15 @@ require __DIR__ . '/include/header.php';
     <div id="verify-status" class="empty">Not listening</div>
   </section>
 
+  <section class="panel verify-chain">
+    <div class="panel-head">
+      <h2>Insertion engine</h2>
+      <span class="panel-meta" id="verify-chain-meta">in-chain tsp splicemonitor on the routed input</span>
+    </div>
+    <p class="muted verify-col-hint">Lossless proof from inside the splice pipeline: UDP command received → enqueued → injected → seen by splicemonitor. If a Roll shows received but never injected, spliceinject has no PTS lock or no null packets to replace.</p>
+    <div id="verify-chain" class="empty">Select an output with a routed input.</div>
+  </section>
+
   <section class="verify-compare" aria-label="Sent vs received SCTE">
     <div class="panel verify-col">
       <div class="panel-head">

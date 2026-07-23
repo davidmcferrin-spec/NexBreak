@@ -5,7 +5,11 @@ nexbreak-proc — processing channel (ingest → optional CC inject → SCTE-35 
 Pipeline:
   ffmpeg (RTSP/SRT/DeckLink → MPEG-TS stdout)
     [| nexbreak-cc-inject  when effective_mode=asr_insert]
-    | tsp spliceinject → UDP local feed
+    | tsp spliceinject → splicemonitor → UDP local feed
+
+tsp runs --verbose; its stderr is parsed into structured splice state
+(/run/nexbreak/splicemon/<svc>.json + journal): spliceinject lifecycle
+(received/enqueued/injected/dropped) and splicemonitor JSON events.
 
 Caption policy: off | auto | force_asr → effective off|preserve|asr_insert.
 """
@@ -48,6 +52,7 @@ from nexbreak_db import (  # noqa: E402
     splice_udp_port_for,
 )
 from nexbreak_pipeline import (  # noqa: E402
+    SPLICEMON_MARKER,
     ffmpeg_ingest_argv,
     ffmpeg_preview_argv,
     hex_to_bytes,
@@ -58,6 +63,7 @@ from nexbreak_pipeline import (  # noqa: E402
     scte35_xml,
     tsp_splice_argv,
     write_bitrate_state,
+    write_splicemon_state,
 )
 
 log = logging.getLogger("nexbreak-proc")
@@ -82,6 +88,177 @@ _pipeline_restart = False
 _next_probe_at = 0.0
 _next_bitrate_at = 0.0
 _sensed_bitrate_kbps: Optional[int] = None
+
+# In-chain splice visibility: spliceinject lifecycle counters (parsed from
+# tsp --verbose stderr) + splicemonitor events (##splicemon## JSON lines).
+_SPLICEMON_RECENT_MAX = 40
+_splicemon_lock = threading.Lock()
+_splicemon: dict[str, Any] = {}
+
+
+def _splicemon_reset() -> None:
+    """(Re)initialize splice-monitor state for a fresh tsp instance."""
+    global _splicemon
+    now = time.time()
+    with _splicemon_lock:
+        _splicemon = {
+            "service_name": str(_channel.get("service_name") or ""),
+            "tsp_started_at": now,
+            # starting → live on first confirmed injection. spliceinject stays
+            # completely silent until PTS lock, so "starting" that never turns
+            # "live" after a Roll points at PTS lock / stuffing / PMT trouble.
+            "engine": "starting",
+            "udp_received": 0,
+            "last_udp_received_at": None,
+            "enqueued": 0,
+            "last_enqueued_at": None,
+            "injected": 0,
+            "last_injected_at": None,
+            "dropped": 0,
+            "last_dropped_at": None,
+            "last_dropped_line": None,
+            "events_total": 0,
+            "counts": {},
+            "last_event": None,
+            "recent": [],
+            "updated_at": now,
+        }
+    _splicemon_flush()
+
+
+def _splicemon_flush() -> None:
+    with _splicemon_lock:
+        svc = str(_splicemon.get("service_name") or "")
+        if not svc:
+            return
+        snap = dict(_splicemon)
+        snap["recent"] = list(_splicemon.get("recent") or [])
+        snap["counts"] = dict(_splicemon.get("counts") or {})
+        snap["updated_at"] = time.time()
+    write_splicemon_state(svc, snap)
+
+
+def _splicemon_snapshot(*, recent_limit: int = 10) -> dict[str, Any]:
+    with _splicemon_lock:
+        snap = dict(_splicemon)
+        snap["recent"] = list(_splicemon.get("recent") or [])[:recent_limit]
+        snap["counts"] = dict(_splicemon.get("counts") or {})
+    return snap
+
+
+def _splicemon_bump(counter: str, ts_key: str, **extra: Any) -> None:
+    with _splicemon_lock:
+        if not _splicemon:
+            return
+        _splicemon[counter] = int(_splicemon.get(counter) or 0) + 1
+        _splicemon[ts_key] = time.time()
+        _splicemon.update(extra)
+    _splicemon_flush()
+
+
+def _splicemon_event(obj: dict[str, Any]) -> None:
+    """Record one splicemonitor JSON event (progress: pending/immediate/occurred/canceled)."""
+    progress = str(obj.get("progress") or "event")
+    entry = {
+        "ts": time.time(),
+        "progress": progress,
+        "event_id": obj.get("event-id"),
+        "event_type": obj.get("event-type"),
+        "splice_pid": obj.get("splice-pid"),
+        "time_to_event_ms": obj.get("time-to-event-ms"),
+        "pre_roll_ms": obj.get("pre-roll-ms"),
+        "status": obj.get("status"),
+        "count": obj.get("count"),
+    }
+    with _splicemon_lock:
+        if not _splicemon:
+            return
+        counts = _splicemon.setdefault("counts", {})
+        counts[progress] = int(counts.get(progress) or 0) + 1
+        _splicemon["events_total"] = int(_splicemon.get("events_total") or 0) + 1
+        _splicemon["last_event"] = entry
+        recent = _splicemon.setdefault("recent", [])
+        recent.insert(0, entry)
+        del recent[_SPLICEMON_RECENT_MAX:]
+        _splicemon["engine"] = "live"
+    _splicemon_flush()
+    extra = ""
+    if entry.get("pre_roll_ms") is not None:
+        extra = f" pre_roll_ms={entry['pre_roll_ms']}"
+    elif entry.get("time_to_event_ms") is not None:
+        extra = f" time_to_event_ms={entry['time_to_event_ms']}"
+    log.info(
+        "splicemon: %s event_id=%s type=%s pid=%s%s",
+        progress,
+        entry.get("event_id"),
+        entry.get("event_type") or "-",
+        entry.get("splice_pid"),
+        extra,
+    )
+
+
+def _tsp_log_reader(stream: Any) -> None:
+    """
+    Drain tsp stderr: parse splicemonitor ##splicemon## JSON events and
+    spliceinject lifecycle lines into _splicemon; forward the rest to the log.
+    Runs as a daemon thread per tsp instance; exits on pipe EOF.
+    """
+    try:
+        for raw in iter(stream.readline, b""):
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            if not line:
+                continue
+            if SPLICEMON_MARKER in line:
+                blob = line[line.find(SPLICEMON_MARKER) + len(SPLICEMON_MARKER):].strip()
+                try:
+                    obj = json.loads(blob)
+                except json.JSONDecodeError:
+                    log.warning("splicemon parse failed: %.200s", blob)
+                    continue
+                if isinstance(obj, dict):
+                    _splicemon_event(obj)
+                continue
+            if "spliceinject:" in line:
+                low = line.lower()
+                if "received message" in low:
+                    _splicemon_bump("udp_received", "last_udp_received_at")
+                elif "enqueuing" in low:
+                    _splicemon_bump("enqueued", "last_enqueued_at")
+                elif "injecting" in low:
+                    _splicemon_bump(
+                        "injected", "last_injected_at", engine="live"
+                    )
+                elif "dropping" in low:
+                    _splicemon_bump(
+                        "dropped", "last_dropped_at", last_dropped_line=line[:240]
+                    )
+                log.info("tsp: %s", line)
+                continue
+            low = line.lower()
+            if "error" in low:
+                log.error("tsp: %s", line)
+            elif "warning" in low:
+                log.warning("tsp: %s", line)
+            else:
+                log.info("tsp: %s", line)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("tsp log reader ended: %s", exc)
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
+def _start_tsp_log_reader(tsp_proc: Popen) -> None:
+    if tsp_proc.stderr is None:
+        return
+    threading.Thread(
+        target=_tsp_log_reader,
+        args=(tsp_proc.stderr,),
+        name="tsp-log",
+        daemon=True,
+    ).start()
 
 
 def _handle_signal(signum, _frame):
@@ -332,6 +509,8 @@ def _start_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
     log.info("ffmpeg: %s", " ".join(ff_argv))
     log.info("tsp: %s", " ".join(tsp_argv))
 
+    _splicemon_reset()
+
     ff = Popen(ff_argv, stdout=PIPE, stderr=None)
     if mode == "asr_insert":
         inject_path = _inject_script()
@@ -353,15 +532,18 @@ def _start_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
         inj = Popen(inj_argv, stdin=ff.stdout, stdout=PIPE, stderr=None)
         if ff.stdout is not None:
             ff.stdout.close()
-        tsp = Popen(tsp_argv, stdin=inj.stdout, stderr=None)
+        tsp = Popen(tsp_argv, stdin=inj.stdout, stderr=PIPE)
         if inj.stdout is not None:
             inj.stdout.close()
         _procs.extend([ff, inj, tsp])
     else:
-        tsp = Popen(tsp_argv, stdin=ff.stdout, stderr=None)
+        tsp = Popen(tsp_argv, stdin=ff.stdout, stderr=PIPE)
         if ff.stdout is not None:
             ff.stdout.close()
         _procs.extend([ff, tsp])
+    # Structured splice visibility: parse spliceinject lifecycle + splicemonitor
+    # JSON from tsp --verbose stderr (otherwise splice failures are silent).
+    _start_tsp_log_reader(tsp)
 
     try:
         _start_preview(channel, bins["ffmpeg"])
@@ -489,6 +671,35 @@ def _send_to_spliceinject(payload: bytes) -> None:
         sock.close()
 
 
+def _splice_send_plan() -> tuple[int, float]:
+    """(count, gap_s) for repeated splice command sends.
+
+    An immediate splice_insert is injected exactly once by spliceinject — one
+    188-byte packet in the whole stream (--inject-count only applies to
+    commands carrying pts_time). Repeating the same command (same event_id)
+    is cheap insurance for downstream receivers and our own verify taps;
+    duplicates are idempotent for compliant splicers.
+    """
+    try:
+        count = max(1, int(os.environ.get("NEXBREAK_SPLICE_SEND_COUNT", "3")))
+    except ValueError:
+        count = 3
+    try:
+        gap_ms = max(0, int(os.environ.get("NEXBREAK_SPLICE_SEND_GAP_MS", "150")))
+    except ValueError:
+        gap_ms = 150
+    return count, gap_ms / 1000.0
+
+
+def _send_splice_payload(payload: bytes) -> int:
+    count, gap_s = _splice_send_plan()
+    for i in range(count):
+        if i and gap_s > 0:
+            time.sleep(gap_s)
+        _send_to_spliceinject(payload)
+    return count
+
+
 def _apply_splice(
     splice_type: str,
     hex_payload: Optional[str],
@@ -525,14 +736,17 @@ def _apply_splice(
     if xml is None:
         assert hex_payload is not None
         raw = hex_to_bytes(hex_payload)
-        _send_to_spliceinject(raw)
-        detail = f"hex payload {len(raw)} bytes event_id={eid} → udp/{_splice_udp}"
+        sends = _send_splice_payload(raw)
+        detail = (
+            f"hex payload {len(raw)} bytes event_id={eid} "
+            f"→ udp/{_splice_udp} x{sends}"
+        )
     else:
-        _send_to_spliceinject(xml.encode("utf-8"))
+        sends = _send_splice_payload(xml.encode("utf-8"))
         extra = ""
         if auto_return and break_duration_sec:
             extra = f" auto_return={break_duration_sec}s"
-        detail = f"xml event_id={eid}{extra} → udp/{_splice_udp}"
+        detail = f"xml event_id={eid}{extra} → udp/{_splice_udp} x{sends}"
 
     log.info("injected %s (%s)", splice_type, detail)
     return {"ok": True, "event_id": eid, "detail": detail, "delay_ms": delay_ms}
@@ -590,6 +804,7 @@ class _ControlHandler(socketserver.StreamRequestHandler):
                     "preview_alive": _preview is not None and _preview.poll() is None,
                     "pipeline_alive": all(p.poll() is None for p in _procs) if _procs else False,
                     "captions": _caption_runtime(),
+                    "splice_monitor": _splicemon_snapshot(),
                 }
             )
             return

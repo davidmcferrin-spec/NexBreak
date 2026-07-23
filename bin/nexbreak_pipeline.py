@@ -319,6 +319,33 @@ def ffmpeg_preview_argv(
     ]
 
 
+# Marker prefix for splicemonitor --json-line events on tsp stderr.
+# nexbreak-proc parses lines containing this marker into structured state.
+SPLICEMON_MARKER = "##splicemon##"
+
+
+def _env_flag(name: str, default: bool = True) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in ("0", "false", "no", "off")
+
+
+def tsp_verbose_enabled() -> bool:
+    """
+    tsp --verbose (default on): spliceinject logs its full command lifecycle
+    (received message / enqueuing / injecting / dropping) ONLY at verbose
+    level. Without it, splice failures are completely silent.
+    Override: NEXBREAK_TSP_VERBOSE=0.
+    """
+    return _env_flag("NEXBREAK_TSP_VERBOSE", True)
+
+
+def splicemon_enabled() -> bool:
+    """In-chain splicemonitor (default on). Override: NEXBREAK_SPLICEMON=0."""
+    return _env_flag("NEXBREAK_SPLICEMON", True)
+
+
 def tsp_splice_argv(
     channel: dict[str, Any],
     tsp: str,
@@ -328,8 +355,8 @@ def tsp_splice_argv(
     feed_port: int,
 ) -> list[str]:
     """
-    tsp chain: stuffing → PMT SCTE declare → spliceinject → drop nulls → UDP feed.
-    Reads MPEG-TS from stdin (-I file -).
+    tsp chain: stuffing → PMT SCTE declare → spliceinject → splicemonitor →
+    drop nulls → UDP feed. Reads MPEG-TS from stdin (-I file -).
 
     TSDuck 3.4x requires --service OR (--pid AND --pts-pid). Using --service -
     selects the first PAT service so PTS/PCR PIDs are taken from that PMT
@@ -338,14 +365,28 @@ def tsp_splice_argv(
     spliceinject only replaces null packets (PID 0x1FFF), so input stuffing is
     required. --min-inter-packet keeps the SCTE PID alive with splice_null so
     Verify always has TID 0xFC traffic even between Roll presses.
+
+    spliceinject facts that shape this argv (verified against TSDuck source):
+      * NOTHING is injected (keepalives included) until the plugin sees a PTS
+        on the service's video/PCR PID ("PTS lock"). Silent until then.
+      * Immediate splice_inserts are injected ONCE (a single TS packet);
+        --inject-count/--inject-interval only apply to commands with pts_time.
+      * All lifecycle logging is verbose-level → tsp runs --verbose so
+        nexbreak-proc can parse it (see tsp_verbose_enabled).
+
+    splicemonitor runs in-process right after spliceinject: lossless proof of
+    insertion, JSON one-liners on stderr (##splicemon## prefix), and it emits
+    nothing for splice_null keepalives — signal without noise.
     """
     scte_pid = int(channel.get("scte35_pid") or 500)
     out_host = resolve_local_feed_host(feed_host)
     # Keep SCTE PID active without needing a known TS bitrate (live remux often
     # reports bitrate=0, which makes --min-bitrate a no-op).
     min_inter = int(os.environ.get("NEXBREAK_SCTE_MIN_INTER_PACKET", "400") or 400)
-    argv = [
-        tsp,
+    argv = [tsp]
+    if tsp_verbose_enabled():
+        argv += ["--verbose"]
+    argv += [
         "--add-input-stuffing", "1/8",
         "-I", "file", "-",
         "-P", "pmt",
@@ -359,6 +400,14 @@ def tsp_splice_argv(
         "--inject-count", "3",
         "--inject-interval", "500",
         "--min-inter-packet", str(max(50, min_inter)),
+    ]
+    if splicemon_enabled():
+        argv += [
+            "-P", "splicemonitor",
+            f"--json-line={SPLICEMON_MARKER}",
+            "--tag", str(channel.get("service_name") or ""),
+        ]
+    argv += [
         "-P", "filter", "--negate", "--pid", "0x1FFF",
         "-O", "ip", f"{out_host}:{int(feed_port)}",
     ]
@@ -801,6 +850,50 @@ def probe_mpegts_bitrate_kbps(
     if best <= 0:
         return None
     return max(1, int(round(best / 1000.0)))
+
+
+# --- Splice-monitor state (in-chain tsp splicemonitor + spliceinject lifecycle) ---
+
+
+def splicemon_run_dir() -> "Path":
+    from pathlib import Path
+
+    d = Path(os.environ.get("NEXBREAK_RUN_DIR", "/run/nexbreak")) / "splicemon"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
+def splicemon_state_path(service_name: str) -> "Path":
+    return splicemon_run_dir() / f"{service_name}.json"
+
+
+def write_splicemon_state(service_name: str, payload: dict[str, Any]) -> None:
+    import json
+
+    path = splicemon_state_path(str(service_name))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def read_splicemon_state(service_name: str) -> Optional[dict[str, Any]]:
+    import json
+
+    path = splicemon_state_path(str(service_name))
+    try:
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 def enrich_channel_bitrate(channel: dict[str, Any]) -> dict[str, Any]:

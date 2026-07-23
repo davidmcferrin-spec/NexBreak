@@ -408,6 +408,87 @@
     renderEvents(cachedLive, cachedSightings, matched);
   }
 
+  function chainBadge(cls, text) {
+    return '<span class="badge ' + cls + '">' + api.esc(text) + "</span>";
+  }
+
+  function chainCounter(label, n, ts) {
+    var s = label + " " + String(n || 0);
+    if (ts) s += " · " + ageLabel(ts);
+    return '<span class="muted">' + api.esc(s) + "</span>";
+  }
+
+  function renderSplicemon(state) {
+    var el = document.getElementById("verify-chain");
+    if (!el) return;
+    if (!state || !state.tsp_started_at) {
+      el.className = "empty";
+      el.textContent =
+        "No splice-monitor state for this input — redeploy and restart nexbreak-proc@N (needs tsp --verbose + splicemonitor in the chain).";
+      return;
+    }
+    var bits = [];
+    if (state.engine === "live") {
+      bits.push(chainBadge("ok", "engine live"));
+    } else {
+      bits.push(chainBadge("dim", "no inserts confirmed yet"));
+    }
+    bits.push(chainCounter("cmd rx", state.udp_received, state.last_udp_received_at));
+    bits.push(chainCounter("enqueued", state.enqueued, state.last_enqueued_at));
+    bits.push(chainCounter("injected", state.injected, state.last_injected_at));
+    if (state.dropped) {
+      bits.push(chainBadge("warn", "dropped " + String(state.dropped)));
+    }
+    var evt = state.last_event;
+    if (evt) {
+      var desc =
+        String(evt.progress || "event") +
+        (evt.event_type ? " " + String(evt.event_type).toUpperCase() : "") +
+        " event_id=" + String(evt.event_id != null ? evt.event_id : "—");
+      if (evt.pre_roll_ms != null) desc += " pre-roll " + String(evt.pre_roll_ms) + "ms";
+      bits.push(
+        "<span>Last: <strong>" +
+          api.esc(desc) +
+          "</strong> " +
+          api.esc(ageLabel(evt.ts)) +
+          "</span>"
+      );
+    }
+    // Diagnosis hint: commands received but nothing ever injected.
+    if (
+      state.engine !== "live" &&
+      Number(state.udp_received || 0) > 0 &&
+      Number(state.injected || 0) === 0
+    ) {
+      bits.push(
+        chainBadge(
+          "warn",
+          "commands reach spliceinject but nothing injected — check PTS lock / input stuffing (journalctl -u nexbreak-proc@N)"
+        )
+      );
+    }
+    el.className = "";
+    el.innerHTML = bits.join(" ");
+  }
+
+  async function loadSplicemon() {
+    var el = document.getElementById("verify-chain");
+    if (!el) return;
+    var pcid = routedProcId();
+    if (!pcid) {
+      el.className = "empty";
+      el.textContent = "No routed input — insertion engine state unavailable.";
+      return;
+    }
+    var r = await api.get("/v1/processing/" + pcid + "/splicemon");
+    if (!r.ok || !r.data || r.data.ok === false) {
+      el.className = "empty";
+      el.textContent = "Splice monitor state unavailable (controller unreachable?).";
+      return;
+    }
+    renderSplicemon(r.data.splicemon || null);
+  }
+
   async function loadInjects() {
     var q = "/v1/audit?event_type=splice_command&limit=80";
     var pcid = routedProcId();
@@ -455,6 +536,7 @@
     renderStatus(live);
     redrawTables();
     loadInjects();
+    loadSplicemon();
   }
 
   async function loadEgresses() {
@@ -511,6 +593,7 @@
     selectedId = Number(box.value) || null;
     renderTap();
     loadInjects();
+    loadSplicemon();
     var cur = currentItem();
     if (cur && cur.listening) {
       setListeningUi(true);
@@ -524,12 +607,16 @@
     selectedId = Number(sel().value) || null;
     renderTap();
     loadInjects();
+    loadSplicemon();
   });
 
   document.getElementById("btn-refresh").addEventListener("click", function () {
     loadEgresses();
     if (listening) pollLive();
-    else loadInjects();
+    else {
+      loadInjects();
+      loadSplicemon();
+    }
   });
 
   document.getElementById("btn-listen").addEventListener("click", async function () {
@@ -593,4 +680,8 @@
 
   loadEgresses();
   setInterval(loadInjects, 5000);
+  setInterval(function () {
+    // Live polling already refreshes this every second while listening.
+    if (!listening) loadSplicemon();
+  }, 5000);
 })();
