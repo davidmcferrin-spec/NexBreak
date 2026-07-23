@@ -25,10 +25,10 @@ require __DIR__ . '/include/header.php';
   <section class="panel ops-journal">
     <h2>Journal</h2>
     <div class="log-bar">
-      <button type="button" id="follow" class="active">Follow</button>
+      <button type="button" id="follow" class="active" title="When on, keep the newest journal lines in view">Follow</button>
       <button type="button" id="copy-log" title="Copy journal text to clipboard">Copy</button>
       <button type="button" id="clear-log">Clear view</button>
-      <button type="button" id="vacuum-journal" title="Rotate and vacuum the host journal (all units)">Vacuum journal…</button>
+      <button type="button" id="vacuum-journal" title="Clear journal history for the selected unit only">Clear unit journal…</button>
       <button type="button" id="restart-unit" disabled>Restart unit…</button>
       <button type="button" id="restart-channels" title="Restart every enabled proc/egress unit">Restart channels…</button>
       <button type="button" id="power-unit" disabled>Start/Stop…</button>

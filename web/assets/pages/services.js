@@ -1,5 +1,7 @@
 "use strict";
 (function () {
+  var JOURNAL_LINES = 300;
+
   var listEl = document.getElementById("unit-list");
   var logEl = document.getElementById("log");
   var statusEl = document.getElementById("status");
@@ -7,11 +9,10 @@
   var restartBtn = document.getElementById("restart-unit");
   var powerBtn = document.getElementById("power-unit");
   var toggleBtn = document.getElementById("toggle-unit");
+  var vacuumBtn = document.getElementById("vacuum-journal");
 
   var selected = null;
   var follow = true;
-  var lastLine = "";
-  var sinceCursor = "";
   var lastServices = [];
   var servicesInFlight = false;
   var journalInFlight = false;
@@ -53,6 +54,7 @@
   }
 
   function updateUnitButtons() {
+    vacuumBtn.disabled = !selected;
     var svc = lastServices.find(function (x) {
       return x.unit === selected;
     });
@@ -118,8 +120,6 @@
 
   function selectUnit(unit) {
     selected = unit;
-    lastLine = "";
-    sinceCursor = "";
     logEl.textContent = "";
     Array.prototype.forEach.call(listEl.querySelectorAll(".unit"), function (el) {
       el.classList.toggle("selected", el.querySelector(".name").textContent === unit);
@@ -130,52 +130,37 @@
     pollJournal(true);
   }
 
-  function extractIso(line) {
-    var m = line.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{4}|Z)?)/);
-    return m ? m[1] : "";
-  }
-
-  function nearBottom() {
-    return logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
-  }
-
   function scrollToBottom() {
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  async function pollJournal(full) {
+  function trimToTail(text, maxLines) {
+    var lines = String(text || "").split("\n");
+    // Drop a single trailing empty line from journalctl output before counting.
+    if (lines.length && lines[lines.length - 1] === "") lines.pop();
+    if (lines.length > maxLines) lines = lines.slice(-maxLines);
+    return lines.length ? lines.join("\n") + "\n" : "";
+  }
+
+  async function pollJournal(forceStick) {
     if (!selected || journalInFlight) return;
     journalInFlight = true;
     try {
-      var stick = full || nearBottom();
-      var body = { unit: selected, lines: full || !sinceCursor ? 150 : 80 };
-      if (!full && sinceCursor) body.since = sinceCursor;
-      var data = await api("journal", body);
-      var text = data.log || "";
-      var lines = text.split("\n").filter(Boolean);
-      if (!lines.length) {
-        statusEl.textContent = selected + " · no new lines";
-        return;
-      }
-      if (full || !logEl.textContent) {
-        logEl.textContent = text;
-        if (stick) scrollToBottom();
+      var stick = !!(forceStick || follow);
+      var prevTop = logEl.scrollTop;
+      // Always re-fetch the last N lines so the buffer stays a fixed tail.
+      var data = await api("journal", { unit: selected, lines: JOURNAL_LINES });
+      var text = trimToTail(data.log || "", JOURNAL_LINES);
+      logEl.textContent = text;
+      if (stick) {
+        scrollToBottom();
       } else {
-        var start = 0;
-        if (lastLine) {
-          var idx = lines.lastIndexOf(lastLine);
-          start = idx >= 0 ? idx + 1 : 0;
-        }
-        var add = lines.slice(start).join("\n");
-        if (add) {
-          logEl.textContent += (logEl.textContent.endsWith("\n") ? "" : "\n") + add + "\n";
-          if (stick) scrollToBottom();
-        }
+        // Keep the user's place when Follow is off (reading older lines).
+        logEl.scrollTop = prevTop;
       }
-      lastLine = lines[lines.length - 1];
-      var iso = extractIso(lastLine);
-      if (iso) sinceCursor = iso;
-      statusEl.textContent = selected + " · updated " + new Date().toLocaleTimeString();
+      var n = text ? text.split("\n").filter(Boolean).length : 0;
+      statusEl.textContent =
+        selected + " · " + n + " lines · updated " + new Date().toLocaleTimeString();
     } catch (err) {
       statusEl.textContent = "journal error: " + err.message;
     } finally {
@@ -186,6 +171,7 @@
   followBtn.addEventListener("click", function () {
     follow = !follow;
     followBtn.classList.toggle("active", follow);
+    if (follow) scrollToBottom();
   });
   document.getElementById("copy-log").addEventListener("click", async function () {
     var text = logEl.textContent || "";
@@ -214,28 +200,30 @@
   });
   document.getElementById("clear-log").addEventListener("click", function () {
     logEl.textContent = "";
-    lastLine = "";
-    sinceCursor = "";
   });
-  document.getElementById("vacuum-journal").addEventListener("click", async function () {
+  vacuumBtn.addEventListener("click", async function () {
+    if (!selected) {
+      statusEl.textContent = "select a unit first";
+      return;
+    }
     if (
       !confirm(
-        "Vacuum the systemd journal on this host?\n\n" +
-          "This rotates and deletes old journal data for ALL units (not just NexBreak).\n" +
-          "Use after fixing a crash loop to clear spam."
+        "Clear journal history for " +
+          selected +
+          "?\n\n" +
+          "This unit's older log lines will no longer appear here.\n" +
+          "Other units are not affected (no host-wide vacuum)."
       )
     ) {
       return;
     }
     try {
-      await api("journal_clear", {});
+      await api("journal_clear", { unit: selected });
       logEl.textContent = "";
-      lastLine = "";
-      sinceCursor = "";
-      statusEl.textContent = "journal vacuumed (host-wide)";
-      if (selected) pollJournal(true);
+      statusEl.textContent = "journal cleared for " + selected;
+      pollJournal(true);
     } catch (err) {
-      statusEl.textContent = "vacuum error: " + err.message;
+      statusEl.textContent = "clear error: " + err.message;
     }
   });
   restartBtn.addEventListener("click", async function () {
@@ -289,7 +277,8 @@
     refreshServices();
   }, 5000);
   setInterval(function () {
-    if (follow && selected) pollJournal(false);
+    if (selected) pollJournal(false);
   }, 2500);
+  vacuumBtn.disabled = true;
   refreshServices();
 })();

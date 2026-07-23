@@ -790,6 +790,98 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": True})
                 return
 
+            if path == "/v1/audit/clear":
+                # Wipe audit (and metrics aggregates) + SCTE sightings for
+                # troubleshooting; leave one config_change row as the receipt.
+                migrate(conn)
+                clear_all = bool(body.get("all"))
+                pcid_raw = body.get("processing_channel_id")
+                if clear_all:
+                    cur = conn.execute("DELETE FROM audit_events")
+                    audit_n = int(cur.rowcount)
+                    cur = conn.execute("DELETE FROM scte_sightings")
+                    sight_n = int(cur.rowcount)
+                    conn.commit()
+                    eid = audit(
+                        conn,
+                        event_type="config_change",
+                        source_ip=self.client_address[0],
+                        result="success",
+                        detail=(
+                            f"audit/metrics cleared for ALL channels "
+                            f"({audit_n} events, {sight_n} sightings)"
+                        ),
+                    )
+                    self._send(
+                        200,
+                        {
+                            "ok": True,
+                            "cleared": "all",
+                            "audit_deleted": audit_n,
+                            "sightings_deleted": sight_n,
+                            "audit_id": eid,
+                        },
+                    )
+                    return
+                if pcid_raw in (None, ""):
+                    self._send(
+                        400,
+                        {
+                            "ok": False,
+                            "error": "processing_channel_id or all=true required",
+                        },
+                    )
+                    return
+                try:
+                    pcid = int(pcid_raw)
+                except (TypeError, ValueError):
+                    self._send(400, {"ok": False, "error": "invalid processing_channel_id"})
+                    return
+                row = conn.execute(
+                    "SELECT id, name FROM processing_channels WHERE id = ?",
+                    (pcid,),
+                ).fetchone()
+                if not row:
+                    self._send(404, {"ok": False, "error": "processing channel not found"})
+                    return
+                ch = row_to_dict(row)
+                assert ch is not None
+                cur = conn.execute(
+                    "DELETE FROM audit_events WHERE processing_channel_id = ?",
+                    (pcid,),
+                )
+                audit_n = int(cur.rowcount)
+                cur = conn.execute(
+                    "DELETE FROM scte_sightings WHERE processing_channel_id = ?",
+                    (pcid,),
+                )
+                sight_n = int(cur.rowcount)
+                conn.commit()
+                eid = audit(
+                    conn,
+                    event_type="config_change",
+                    processing_channel_id=pcid,
+                    source_ip=self.client_address[0],
+                    result="success",
+                    detail=(
+                        f"audit/metrics cleared for processing_channel_id={pcid} "
+                        f"({ch.get('name')}; {audit_n} events, {sight_n} sightings)"
+                    ),
+                )
+                self._send(
+                    200,
+                    {
+                        "ok": True,
+                        "cleared": "channel",
+                        "processing_channel_id": pcid,
+                        "name": ch.get("name"),
+                        "audit_deleted": audit_n,
+                        "sightings_deleted": sight_n,
+                        "audit_id": eid,
+                    },
+                )
+                return
+
             if path == "/v1/captions/lexicon":
                 word = (body.get("word") or "").strip()
                 phonetic = (body.get("phonetic") or "").strip()

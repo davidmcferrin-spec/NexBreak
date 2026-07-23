@@ -72,7 +72,7 @@
       return;
     }
     el.innerHTML =
-      '<table class="data"><thead><tr><th>Channel</th><th>Splices</th><th>OK</th><th>Fail</th><th>Config</th></tr></thead><tbody>' +
+      '<table class="data"><thead><tr><th>Channel</th><th>Splices</th><th>OK</th><th>Fail</th><th>Config</th><th></th></tr></thead><tbody>' +
       rows
         .map(function (r) {
           return (
@@ -88,11 +88,56 @@
             n(r.splice_fail) +
             "</td><td>" +
             n(r.config_changes) +
-            "</td></tr>"
+            '</td><td><button type="button" class="btn-clear-channel" data-id="' +
+            api.esc(r.id) +
+            '" data-name="' +
+            api.esc(r.name || "#" + r.id) +
+            '">Clear…</button></td></tr>'
           );
         })
         .join("") +
       "</tbody></table>";
+    el.querySelectorAll(".btn-clear-channel").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        clearChannel(btn.getAttribute("data-id"), btn.getAttribute("data-name"));
+      });
+    });
+  }
+
+  async function clearChannel(id, name) {
+    if (!id) return;
+    if (
+      !confirm(
+        "Clear audit and metrics for " +
+          (name || "#" + id) +
+          "?\n\n" +
+          "Deletes this processing channel's audit_events and SCTE sightings.\n" +
+          "Other channels are unchanged."
+      )
+    ) {
+      return;
+    }
+    var state = document.getElementById("state");
+    state.textContent = "clearing…";
+    state.className = "muted";
+    var res = await api.post("/v1/audit/clear", {
+      processing_channel_id: Number(id),
+    });
+    if (!res.ok || !res.data || !res.data.ok) {
+      state.textContent = (res.data && res.data.error) || "clear failed";
+      state.className = "bad";
+      api.toast(state.textContent, "error");
+      return;
+    }
+    var d = res.data;
+    state.textContent =
+      "cleared " +
+      (d.audit_deleted || 0) +
+      " events · " +
+      (d.name || name || "#" + id);
+    state.className = "ok";
+    api.toast(state.textContent, "ok");
+    await load();
   }
 
   function renderRoutes(routes) {

@@ -155,12 +155,13 @@ if ($action === 'services') {
 
 if ($action === 'journal') {
     $unit = $body['unit'] ?? ($_GET['unit'] ?? '');
-    $lines = (int) ($body['lines'] ?? ($_GET['lines'] ?? 100));
+    $lines = (int) ($body['lines'] ?? ($_GET['lines'] ?? 300));
     $since = $body['since'] ?? ($_GET['since'] ?? '');
     if (!is_string($unit) || !unit_allowed($unit)) {
         fail(400, 'invalid unit');
     }
-    $lines = max(1, min(500, $lines));
+    // Services UI shows a fixed tail (viewport scrolls within this buffer).
+    $lines = max(1, min(300, $lines));
     $argv = ['/usr/local/bin/nexbreak-ops-journal.sh', $unit, (string) $lines];
     if (is_string($since) && $since !== '') {
         $argv[] = $since;
@@ -174,14 +175,19 @@ if ($action === 'journal') {
 }
 
 if ($action === 'journal_clear') {
-    // Rotates + vacuums the whole host journal (systemd has no per-unit delete).
-    $r = sudo_run(['/usr/local/bin/nexbreak-ops-journal-clear.sh']);
+    // Per-unit clear watermark (systemd cannot delete one unit's journal).
+    $unit = $body['unit'] ?? ($_GET['unit'] ?? '');
+    if (!is_string($unit) || !unit_allowed($unit)) {
+        fail(400, 'invalid unit');
+    }
+    $r = sudo_run(['/usr/local/bin/nexbreak-ops-journal-clear.sh', $unit]);
     if ($r['code'] !== 0) {
         fail(500, trim($r['stderr']) !== '' ? trim($r['stderr']) : 'journal clear failed');
     }
     echo json_encode([
         'ok' => true,
-        'detail' => 'journal rotated and vacuumed (host-wide)',
+        'unit' => $unit,
+        'detail' => "journal cleared for {$unit} (other units unchanged)",
         'stdout' => $r['stdout'],
     ]);
     exit;

@@ -10,7 +10,15 @@ require __DIR__ . '/include/header.php';
     <h1>Audit</h1>
     <p class="sub">Splice commands, service lifecycle, config and routing changes</p>
   </div>
-  <button type="button" id="btn-refresh">Refresh</button>
+  <div class="bar">
+    <label class="muted" for="filter-channel">Channel</label>
+    <select id="filter-channel">
+      <option value="">All channels</option>
+    </select>
+    <button type="button" id="btn-clear-audit" title="Delete audit events and SCTE sightings for the selected scope">Clear audit…</button>
+    <button type="button" id="btn-refresh">Refresh</button>
+    <span id="state" class="muted"></span>
+  </div>
 </div>
 
 <section class="panel">
