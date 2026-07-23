@@ -4,6 +4,11 @@ nexbreak-egress — local feed → SRT (v1) / HLS (later).
 
 Reads the MPEG-TS UDP feed currently assigned by routing_assignments
 (processing local_feed_host:port) and pushes SRT via ffmpeg+libsrt.
+
+Self-healing: ffmpeg is restarted on exit. SRT listener URLs use
+peeridletimeout so a dropped client tears down the session; stderr is
+watched for mux I/O errors so a hung-but-alive ffmpeg is killed and
+recycled for the next VLC/connect.
 """
 
 from __future__ import annotations
@@ -12,9 +17,10 @@ import argparse
 import logging
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
-from subprocess import Popen
+from subprocess import PIPE, STDOUT, Popen
 from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -29,6 +35,18 @@ from nexbreak_pipeline import (  # noqa: E402
 log = logging.getLogger("nexbreak-egress")
 _stop = False
 _proc: Optional[Popen] = None
+_kill_requested = False
+
+# stderr lines that mean the SRT session is dead but ffmpeg may still be alive
+_FATAL_MARKERS = (
+    "error submitting a packet to the muxer",
+    "error muxing a packet",
+    "error writing trailer",
+    "error closing file",
+    "input/output error",
+    "connection timed out",
+    "broken pipe",
+)
 
 
 def _handle_signal(signum, _frame):
@@ -63,8 +81,54 @@ def _kill() -> None:
     _proc = None
 
 
+def _stderr_watch(proc: Popen, stream) -> None:
+    """Kill ffmpeg if SRT mux is clearly dead (avoids hung listener)."""
+    global _kill_requested
+    try:
+        for raw in stream:
+            if _stop:
+                break
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            low = line.lower()
+            if any(m in low for m in _FATAL_MARKERS):
+                log.warning("ffmpeg SRT fault — recycling: %s", line[:200])
+                _kill_requested = True
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                time.sleep(1.0)
+                if proc.poll() is None:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                break
+            # Surface non-fatal ffmpeg lines so journal still shows activity.
+            if "non-existing pps" not in low and "no frame" not in low:
+                log.info("ffmpeg: %s", line[:300])
+    except Exception as exc:  # noqa: BLE001
+        log.debug("stderr watch ended: %s", exc)
+
+
+def _spawn(argv: list[str]) -> Popen:
+    global _kill_requested
+    _kill_requested = False
+    proc = Popen(argv, stdout=PIPE, stderr=STDOUT)
+    t = threading.Thread(
+        target=_stderr_watch,
+        args=(proc, proc.stdout),
+        daemon=True,
+        name="egress-ff-watch",
+    )
+    t.start()
+    return proc
+
+
 def main() -> int:
-    global _proc, _stop
+    global _proc, _stop, _kill_requested
 
     parser = argparse.ArgumentParser(description="NexBreak egress channel")
     parser.add_argument("--service-name", required=True)
@@ -134,7 +198,11 @@ def main() -> int:
             return 1
 
         log.info("ffmpeg: %s", " ".join(argv))
-        _proc = Popen(argv)
+        if "peeridletimeout=" not in " ".join(argv):
+            log.error(
+                "BUG: SRT URL missing peeridletimeout — wrong nexbreak_pipeline deployed?"
+            )
+        _proc = _spawn(argv)
 
         audit(
             conn,
@@ -143,43 +211,51 @@ def main() -> int:
             processing_channel_id=source["id"],
             detail=(
                 f"nexbreak-egress@{args.service_name} up; "
-                f"udp://{feed_host}:{feed_port} → {channel['output_type']}"
+                f"udp://{feed_host}:{feed_port} → {channel['output_type']} "
+                f"(self-heal on SRT peer drop)"
             ),
         )
 
         rc = 0
         restart_at = 0.0
-        backoff = 2.0
+        backoff = 0.5
         while not _stop:
             if _proc is not None and _proc.poll() is not None:
                 code = _proc.returncode
+                reason = "srt-fault" if _kill_requested else f"exit-{code}"
                 now = time.time()
                 if now < restart_at:
-                    time.sleep(0.2)
+                    time.sleep(0.1)
                     continue
                 log.warning(
-                    "ffmpeg exited code=%s — restarting in %.0fs",
+                    "ffmpeg recycled (%s code=%s) — restarting in %.1fs",
+                    reason,
                     code,
                     backoff,
                 )
-                audit(
-                    conn,
-                    event_type="service_crash",
-                    egress_channel_id=channel["id"],
-                    result="failure",
-                    detail=f"ffmpeg exited {code}; auto-restart",
-                )
+                try:
+                    audit(
+                        conn,
+                        event_type="service_crash",
+                        egress_channel_id=channel["id"],
+                        result="failure",
+                        detail=f"ffmpeg {reason} code={code}; auto-restart",
+                    )
+                except Exception:
+                    pass
                 restart_at = now + backoff
                 time.sleep(backoff)
-                backoff = min(30.0, backoff * 1.5)
+                # Brief pause so SRT listen port is released.
+                time.sleep(0.2)
+                backoff = min(15.0, max(0.5, backoff * 1.4))
                 if _stop:
                     break
-                _proc = Popen(argv)
+                _proc = _spawn(argv)
                 continue
-            # Healthy run — decay backoff.
-            if _proc is not None and _proc.poll() is None and backoff > 2.0:
-                backoff = 2.0
-            time.sleep(0.5)
+            # Healthy run — decay backoff toward fast reconnect.
+            if _proc is not None and _proc.poll() is None and backoff > 0.5:
+                backoff = max(0.5, backoff * 0.9)
+            time.sleep(0.25)
 
         _kill()
         audit(

@@ -2,14 +2,15 @@
 Description=NexBreak egress channel %i (packaging + delivery)
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=5
+# Allow rapid recycle when SRT clients drop (ffmpeg listener is single-session).
+StartLimitIntervalSec=120
+StartLimitBurst=30
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /opt/nexbreak/bin/nexbreak-egress --service-name %i --db /var/lib/nexbreak/nexbreak.sqlite
-Restart=on-failure
-RestartSec=2
+Restart=always
+RestartSec=1
 User=nexbreak
 Group=nexbreak
 

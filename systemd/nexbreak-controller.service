@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /opt/nexbreak/bin/nexbreak-controller --db /var/lib/nexbreak/nexbreak.sqlite --host 127.0.0.1 --port 8787
-Restart=on-failure
+Restart=always
 RestartSec=2
 User=nexbreak
 Group=nexbreak

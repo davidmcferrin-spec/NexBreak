@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/mediamtx /etc/nexbreak/mediamtx.yml
-Restart=on-failure
+Restart=always
 RestartSec=2
 User=nexbreak
 Group=nexbreak

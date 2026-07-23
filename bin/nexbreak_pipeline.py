@@ -354,19 +354,31 @@ def tsp_splice_argv(
 
 
 def build_srt_output_url(channel: dict[str, Any]) -> str:
+    """
+    Build SRT URL for egress.
+
+    Listener: peeridletimeout + linger=0 so a dropped VLC/client tears down the
+    socket and ffmpeg exits (nexbreak-egress restarts it for the next connect).
+    Without that, ffmpeg often hangs mid-write and the port looks open but
+    rejects reconnects until a manual egress restart.
+    """
     mode = channel.get("srt_mode") or "listener"
+    # Shared live-stream flags (ffmpeg libsrt URL query).
+    common = "latency=200&transtype=live&linger=0&tlpktdrop=1"
+    # ~3s without peer activity → connection die → mux I/O error → process exit.
+    idle = "peeridletimeout=3000"
     if mode == "listener":
         port = channel.get("srt_listen_port")
         if not port:
             raise ValueError("srt_listen_port required for SRT listener egress")
-        return f"srt://0.0.0.0:{int(port)}?mode=listener&latency=200&transtype=live"
+        return f"srt://0.0.0.0:{int(port)}?mode=listener&{common}&{idle}"
     host = channel.get("srt_remote_host")
     port = channel.get("srt_remote_port")
     if not host or not port:
         raise ValueError("srt_remote_host/port required for SRT caller/rendezvous egress")
     if mode == "rendezvous":
-        return f"srt://{host}:{int(port)}?mode=rendezvous&latency=200&transtype=live"
-    return f"srt://{host}:{int(port)}?mode=caller&latency=200&transtype=live"
+        return f"srt://{host}:{int(port)}?mode=rendezvous&{common}&{idle}"
+    return f"srt://{host}:{int(port)}?mode=caller&{common}&{idle}"
 
 
 def ffmpeg_egress_argv(
@@ -387,7 +399,7 @@ def ffmpeg_egress_argv(
     return [
         ffmpeg,
         "-hide_banner",
-        "-loglevel", "error",
+        "-loglevel", "warning",
         "-nostdin",
         "-fflags", "+genpts+discardcorrupt",
         "-flags", "low_delay",

@@ -2,13 +2,13 @@
 Description=NexBreak processing channel %i (ingest + SCTE splice + captioning)
 After=network-online.target nexbreak-mediamtx.service
 Wants=network-online.target nexbreak-mediamtx.service
-StartLimitIntervalSec=60
-StartLimitBurst=5
+StartLimitIntervalSec=120
+StartLimitBurst=20
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /opt/nexbreak/bin/nexbreak-proc --service-name %i --db /var/lib/nexbreak/nexbreak.sqlite
-Restart=on-failure
+Restart=always
 RestartSec=2
 User=nexbreak
 Group=nexbreak
