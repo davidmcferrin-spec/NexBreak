@@ -102,7 +102,10 @@
       return;
     }
     el.innerHTML =
-      '<table class="data"><thead><tr>' +
+      '<table class="data asr-live"><colgroup>' +
+      '<col class="col-ch"><col class="col-vosk"><col class="col-state">' +
+      '<col class="col-tap"><col class="col-cue"><col class="col-text"><col class="col-text">' +
+      "</colgroup><thead><tr>" +
       "<th>Channel</th><th>Vosk</th><th>State</th><th>Tap</th><th>Cue sock</th><th>Partial</th><th>Last final</th>" +
       "</tr></thead><tbody>" +
       channels
@@ -113,13 +116,21 @@
           var vosk = asr.vosk_loaded
             ? '<span class="badge ok">loaded</span>'
             : '<span class="badge dim">bypass</span>';
-          var reason = asr.reason ? ' <span class="muted">' + api.esc(String(asr.reason).slice(0, 60)) + "</span>" : "";
+          var reason = asr.reason
+            ? ' <span class="muted" title="' +
+              api.esc(String(asr.reason)) +
+              '">' +
+              api.esc(String(asr.reason).slice(0, 40)) +
+              "</span>"
+            : "";
           var tap = asr.audio_tap_alive
             ? '<span class="badge ok">alive</span>'
             : '<span class="badge dim">—</span>';
           var cue = asr.cue_connected
             ? '<span class="badge ok">up</span>'
             : '<span class="badge dim">down</span>';
+          var partial = String(asr.partial || "");
+          var finalText = String(asr.final || "");
           return (
             "<tr><td><strong>" +
             api.esc(ch.name) +
@@ -132,10 +143,14 @@
             tap +
             "</td><td>" +
             cue +
-            "</td><td class=\"muted\">" +
-            api.esc(String(asr.partial || "")) +
-            "</td><td>" +
-            api.esc(String(asr.final || "")) +
+            '</td><td class="asr-text muted" title="' +
+            api.esc(partial) +
+            '">' +
+            api.esc(partial) +
+            '</td><td class="asr-text" title="' +
+            api.esc(finalText) +
+            '">' +
+            api.esc(finalText) +
             "</td></tr>"
           );
         })

@@ -269,6 +269,25 @@ table.data th {
 
 table.data tbody tr:hover { background: var(--row-selected); }
 
+/* Captions ASR live: fixed status cols; Partial / Last final split remainder equally */
+table.asr-live {
+  table-layout: fixed;
+}
+
+table.asr-live col.col-ch { width: 8.5rem; }
+table.asr-live col.col-vosk { width: 9rem; }
+table.asr-live col.col-state { width: 6.5rem; }
+table.asr-live col.col-tap { width: 4.25rem; }
+table.asr-live col.col-cue { width: 5.25rem; }
+/* .col-text: no width — remaining space is shared equally by the two text cols */
+
+table.asr-live th,
+table.asr-live td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .badge {
   display: inline-block;
   padding: 2px 7px;
