@@ -165,7 +165,7 @@ cmd_deps() {
 
 cmd_install() {
   id -u nexbreak &>/dev/null || useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin nexbreak
-  mkdir -p "$PREFIX" "$DATA" "$LOG" /run/nexbreak
+  mkdir -p "$PREFIX" "$DATA" "$LOG" "$DATA/scte" /run/nexbreak
   rsync -a --delete \
     --exclude '.git' --exclude 'data/*.sqlite' --exclude '__pycache__' \
     "$ROOT"/ "$PREFIX"/

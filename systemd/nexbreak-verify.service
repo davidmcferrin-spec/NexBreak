@@ -10,10 +10,13 @@ Restart=always
 RestartSec=2
 User=nexbreak
 Group=nexbreak
-# Owns /run/nexbreak/scte for watch pid/state (isolated from controller).
+# Owns SCTE watch pid/state under /var/lib/nexbreak/scte (not /run — spawned
+# helpers hit EROFS on RuntimeDirectory after ProtectSystem=strict).
 RuntimeDirectory=nexbreak
 RuntimeDirectoryMode=0770
 Environment=NEXBREAK_RUN_DIR=/run/nexbreak
+Environment=NEXBREAK_DATA=/var/lib/nexbreak
+Environment=NEXBREAK_SCTE_DIR=/var/lib/nexbreak/scte
 Environment=NEXBREAK_VERIFY_PORT=8788
 Environment=NEXBREAK_LOG_DIR=/var/log/nexbreak
 ReadWritePaths=/var/lib/nexbreak /var/log/nexbreak /run/nexbreak

@@ -2,8 +2,9 @@
 """
 nexbreak-verify — SCTE return-feed Verify API (isolated from the controller).
 
-Owns listen/stop of nexbreak-scte-watch, /run/nexbreak/scte state, and
-scte_sightings reads. stdlib only. Default bind: 127.0.0.1:8788.
+Owns listen/stop of nexbreak-scte-watch, SCTE state under
+/var/lib/nexbreak/scte, and scte_sightings reads. stdlib only.
+Default bind: 127.0.0.1:8788.
 """
 
 from __future__ import annotations
@@ -130,13 +131,19 @@ def _start_scte_watch(
         log_fh = subprocess.DEVNULL
     child_env = os.environ.copy()
     child_env.setdefault("NEXBREAK_RUN_DIR", os.environ.get("NEXBREAK_RUN_DIR", "/run/nexbreak"))
+    child_env.setdefault("NEXBREAK_DATA", os.environ.get("NEXBREAK_DATA", "/var/lib/nexbreak"))
+    child_env.setdefault(
+        "NEXBREAK_SCTE_DIR",
+        os.environ.get("NEXBREAK_SCTE_DIR", str(scte_dir())),
+    )
     try:
         proc = subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
+            # Stay in the service mount namespace so ReadWritePaths apply.
+            start_new_session=False,
             env=child_env,
             cwd=str(Path(script).resolve().parent),
         )
@@ -379,6 +386,12 @@ def main() -> int:
     DB_PATH = args.db or os.environ.get(
         "NEXBREAK_DB", "/var/lib/nexbreak/nexbreak.sqlite"
     )
+    try:
+        scte = scte_dir(create=True)
+        log.info("SCTE state dir %s", scte)
+    except OSError as exc:
+        log.error("cannot create SCTE state dir: %s", exc)
+        return 1
     conn = connect(DB_PATH)
     try:
         migrate(conn)

@@ -17,6 +17,10 @@ def run_dir() -> Path:
     return Path(os.environ.get("NEXBREAK_RUN_DIR", "/run/nexbreak"))
 
 
+def data_dir() -> Path:
+    return Path(os.environ.get("NEXBREAK_DATA", "/var/lib/nexbreak"))
+
+
 def ensure_run_subdir(name: str) -> Path:
     """Create /run/nexbreak/<name> when writable; raise OSError if not."""
     d = run_dir() / name
@@ -25,10 +29,19 @@ def ensure_run_subdir(name: str) -> Path:
 
 
 def scte_dir(*, create: bool = False) -> Path:
-    """SCTE verify state dir. Do not mkdir on read paths (ProtectSystem EROFS)."""
+    """
+    SCTE verify pid/state directory.
+
+    Lives under /var/lib/nexbreak/scte (not RuntimeDirectory /run/nexbreak).
+    Spawned scte-watch children can see /run as read-only under
+    ProtectSystem=strict once they leave the service mount namespace;
+    the data dir stays in ReadWritePaths and remains writable.
+    """
+    override = (os.environ.get("NEXBREAK_SCTE_DIR") or "").strip()
+    d = Path(override) if override else (data_dir() / "scte")
     if create:
-        return ensure_run_subdir("scte")
-    return run_dir() / "scte"
+        d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def asr_dir(*, create: bool = False) -> Path:
@@ -38,11 +51,11 @@ def asr_dir(*, create: bool = False) -> Path:
 
 
 def scte_state_path(egress_id: int) -> Path:
-    return run_dir() / "scte" / f"egress-{int(egress_id)}.json"
+    return scte_dir() / f"egress-{int(egress_id)}.json"
 
 
 def scte_pid_path(egress_id: int) -> Path:
-    return run_dir() / "scte" / f"egress-{int(egress_id)}.pid"
+    return scte_dir() / f"egress-{int(egress_id)}.pid"
 
 
 def asr_state_path(service_name: str) -> Path:
