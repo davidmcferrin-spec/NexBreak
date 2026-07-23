@@ -5,7 +5,8 @@ nexbreak-caption-worker — per-stream ASR → cue socket for cc-inject.
 - Taps audio from the local MPEG-TS UDP feed (ffmpeg → s16le 16 kHz mono).
 - Optional Vosk when model + package available.
 - Applies caption_blacklist / caption_lexicon from SQLite.
-- Publishes JSON cues to the inject cue socket (never blocks the media path).
+- Publishes JSON cues to the inject cue socket (finals only — not partial
+  hypotheses). Never blocks the media path.
 
 Stdlib preferred; vosk is optional.
 """
@@ -361,13 +362,13 @@ def main() -> int:
                     result = {}
                 text = apply_text(str(result.get("text") or ""), blacklist, lexicon)
                 last_partial = ""
+                last_final_at = time.time()
                 if text:
                     last_final = text
                     state_name = "final"
-                last_final_at = time.time()
-                seq += 1
-                # Cue socket only — cc-inject bridges to LCE UDP (never dual-send).
-                cue = send_cue(cue, text=text, clear=not text, seq=seq)
+                    seq += 1
+                    # Finals only → inject. Partials stay in ASR state for UI.
+                    cue = send_cue(cue, text=text, clear=False, seq=seq)
             else:
                 try:
                     partial = json.loads(rec.PartialResult())
@@ -377,8 +378,7 @@ def main() -> int:
                 if ptext and ptext != last_partial:
                     last_partial = ptext
                     state_name = "partial"
-                    seq += 1
-                    cue = send_cue(cue, text=ptext, clear=False, seq=seq)
+                    # Do NOT cue/inject partials — they hammer LCE with "to"/"to do"/…
                 elif last_partial and (time.time() - last_final_at) > 8.0:
                     last_partial = ""
                     seq += 1

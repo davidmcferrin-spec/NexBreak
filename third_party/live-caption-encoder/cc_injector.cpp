@@ -449,6 +449,21 @@ int main(int argc, char** argv)
     AVPacket* opkt = av_packet_alloc();
     AVFrame*  vfrm = av_frame_alloc();
 
+    // MPEG-TS rejects equal DTS (needs strictly increasing). Video re-encode +
+    // audio copy can emit duplicate timestamps under load / caption spikes.
+    int64_t last_v_dts = AV_NOPTS_VALUE;
+    int64_t last_a_dts = AV_NOPTS_VALUE;
+    auto ensure_monotonic_dts = [](AVPacket* pkt, int64_t& last_dts) {
+        if (!pkt) return;
+        if (pkt->dts != AV_NOPTS_VALUE) {
+            if (last_dts != AV_NOPTS_VALUE && pkt->dts <= last_dts)
+                pkt->dts = last_dts + 1;
+            last_dts = pkt->dts;
+        }
+        if (pkt->pts != AV_NOPTS_VALUE && pkt->dts != AV_NOPTS_VALUE && pkt->pts < pkt->dts)
+            pkt->pts = pkt->dts;
+    };
+
     // Caption state
     const bool USE_ROLLUP = true;
     RollUp2State ru2{};
@@ -542,6 +557,7 @@ int main(int argc, char** argv)
                     while (avcodec_receive_packet(vencCtx, opkt) == 0) {
                         av_packet_rescale_ts(opkt, vencCtx->time_base, vout->time_base);
                         opkt->stream_index = vout->index;
+                        ensure_monotonic_dts(opkt, last_v_dts);
                         av_interleaved_write_frame(ofmt, opkt);
                         av_packet_unref(opkt);
                     }
@@ -553,6 +569,7 @@ int main(int argc, char** argv)
             if (ap) {
                 ap->stream_index = aout->index;
                 av_packet_rescale_ts(ap, ifmt->streams[aIdx]->time_base, aout->time_base);
+                ensure_monotonic_dts(ap, last_a_dts);
                 av_interleaved_write_frame(ofmt, ap);
                 av_packet_free(&ap);
             }
@@ -565,6 +582,7 @@ int main(int argc, char** argv)
     while (avcodec_receive_packet(vencCtx, opkt) == 0) {
         av_packet_rescale_ts(opkt, vencCtx->time_base, vout->time_base);
         opkt->stream_index = vout->index;
+        ensure_monotonic_dts(opkt, last_v_dts);
         av_interleaved_write_frame(ofmt, opkt);
         av_packet_unref(opkt);
     }
