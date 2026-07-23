@@ -9,7 +9,7 @@ require __DIR__ . '/include/header.php';
   <div class="page-header verify-header">
     <div>
       <h1>Verify</h1>
-      <p class="sub">Correlate SCTE sent (controller) vs received (bitstream) — latest at the top of each table</p>
+      <p class="sub">Listen runs until Stop — watches the feed and auto-fires test splices so Sent and Received stay in sync</p>
     </div>
   </div>
 
@@ -23,22 +23,20 @@ require __DIR__ . '/include/header.php';
         </label>
         <button type="button" class="primary" id="btn-listen">Listen</button>
         <button type="button" id="btn-stop" disabled>Stop</button>
-        <button type="button" id="btn-probe">Probe feed</button>
         <button type="button" id="btn-refresh">Refresh</button>
       </div>
     </div>
     <div id="verify-tap" class="muted verify-meta">Select an output to see the tap source.</div>
     <div id="verify-status" class="empty">Not listening</div>
-    <div id="verify-probe" class="muted"></div>
   </section>
 
   <section class="verify-compare" aria-label="Sent vs received SCTE">
     <div class="panel verify-col">
       <div class="panel-head">
         <h2>Sent</h2>
-        <span class="panel-meta" id="verify-injects-meta">controller → spliceinject</span>
+        <span class="panel-meta" id="verify-injects-meta">controller / verify auto-inject</span>
       </div>
-      <p class="muted verify-col-hint">Commands accepted for the routed input. Match by Event ID to Received.</p>
+      <p class="muted verify-col-hint">Splice commands for the routed input (Roll + Listen auto-inject). Match by Event ID.</p>
       <div id="verify-injects" class="verify-scroll">
         <div class="empty">No recent splice commands</div>
       </div>
@@ -48,9 +46,9 @@ require __DIR__ . '/include/header.php';
         <h2>Received</h2>
         <span class="panel-meta" id="verify-events-meta">TSDuck on tap</span>
       </div>
-      <p class="muted verify-col-hint">TID 0xFC on the post-splice feed. Empty while Sent succeeds means markers are not on the wire.</p>
+      <p class="muted verify-col-hint">TID 0xFC on the post-splice feed while Listen is running.</p>
       <div id="verify-events" class="verify-scroll">
-        <div class="empty">Start listening, then fire a splice from Roll.</div>
+        <div class="empty">Click Listen — test splices fire automatically until Stop.</div>
       </div>
     </div>
   </section>

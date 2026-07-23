@@ -29,6 +29,7 @@ from nexbreak_db import (  # noqa: E402
     migrate,
     row_to_dict,
     rows_to_dicts,
+    splice_udp_port_for,
 )
 from nexbreak_verify import (  # noqa: E402
     empty_scte_state,
@@ -93,6 +94,7 @@ def _start_scte_watch(
     *,
     processing: Optional[dict[str, Any]],
     tap: dict[str, Any],
+    auto_inject_sec: float = 12.0,
 ) -> dict[str, Any]:
     eid = int(egress["id"])
     stop_watch_pid(eid)
@@ -127,6 +129,17 @@ def _start_scte_watch(
             argv += ["--feed-port", str(int(tap["feed_port"]))]
     if processing:
         argv += ["--processing-channel-id", str(processing["id"])]
+        try:
+            argv += ["--splice-udp-port", str(splice_udp_port_for(processing))]
+        except Exception:
+            pass
+        if auto_inject_sec and auto_inject_sec > 0:
+            argv += [
+                "--auto-inject-sec",
+                str(float(auto_inject_sec)),
+                "--auto-inject-first-delay-sec",
+                "2.5",
+            ]
     if DB_PATH:
         argv += ["--db", DB_PATH]
     log_path = Path(os.environ.get("NEXBREAK_LOG_DIR", "/var/log/nexbreak")) / f"scte-watch-{eid}.log"
@@ -192,6 +205,7 @@ def _start_scte_watch(
         "listening": True,
         "tap": tap,
         "live": live,
+        "auto_inject_sec": auto_inject_sec if processing else 0,
     }
 
 
@@ -296,7 +310,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path.rstrip("/") or "/"
-        _body = self._read_json()  # reserved for future options
+        _body = self._read_json()
         conn = db()
         try:
             if path.startswith("/v1/verify/") and path.endswith("/listen"):
@@ -314,7 +328,19 @@ class Handler(BaseHTTPRequestHandler):
                 if not tap.get("ok"):
                     self._send(400, {"ok": False, "error": tap.get("error") or "tap failed"})
                     return
-                result = _start_scte_watch(eg, processing=proc, tap=tap)
+                auto_sec = 12.0
+                if isinstance(_body, dict) and _body.get("auto_inject_sec") is not None:
+                    try:
+                        auto_sec = float(_body["auto_inject_sec"])
+                    except (TypeError, ValueError):
+                        auto_sec = 12.0
+                # Listen owns continuous verify: watch + periodic test injects until Stop.
+                result = _start_scte_watch(
+                    eg,
+                    processing=proc,
+                    tap=tap,
+                    auto_inject_sec=auto_sec,
+                )
                 if not result.get("ok"):
                     self._send(502, result)
                     return
@@ -325,7 +351,10 @@ class Handler(BaseHTTPRequestHandler):
                     processing_channel_id=proc["id"] if proc else None,
                     source_ip=self.client_address[0],
                     result="success",
-                    detail=f"scte verify listen kind={tap.get('tap_kind')} {tap.get('label')}",
+                    detail=(
+                        f"scte verify listen kind={tap.get('tap_kind')} "
+                        f"auto_inject={auto_sec}s {tap.get('label')}"
+                    ),
                 )
                 self._send(200, result)
                 return
@@ -383,23 +412,35 @@ class Handler(BaseHTTPRequestHandler):
                         },
                     )
                     return
-                duration = 8.0
+                duration = 10.0
                 if isinstance(_body, dict) and _body.get("duration_s") is not None:
                     try:
                         duration = float(_body["duration_s"])
                     except (TypeError, ValueError):
-                        duration = 8.0
+                        duration = 10.0
+                fire = True
+                if isinstance(_body, dict) and "fire_test_splice" in _body:
+                    fire = bool(_body.get("fire_test_splice"))
                 scte_pid = None
+                splice_udp = None
                 if proc:
                     try:
                         scte_pid = int(proc.get("scte35_pid") or 500)
                     except (TypeError, ValueError):
                         scte_pid = 500
+                    try:
+                        from nexbreak_db import splice_udp_port_for
+
+                        splice_udp = splice_udp_port_for(proc)
+                    except Exception:
+                        splice_udp = None
                 result = probe_scte_feed(
                     str(tap["feed_host"]),
                     int(tap["feed_port"]),
                     duration_s=duration,
                     scte_pid=scte_pid,
+                    splice_udp_port=splice_udp,
+                    fire_test_splice=fire,
                 )
                 audit(
                     conn,
@@ -411,7 +452,8 @@ class Handler(BaseHTTPRequestHandler):
                     detail=(
                         f"scte probe verdict={result.get('verdict')} "
                         f"sections={result.get('section_count')} "
-                        f"pmt={result.get('pmt_scte_pids')}"
+                        f"pmt={result.get('pmt_scte_pids')} "
+                        f"test_inject={result.get('test_inject')}"
                     ),
                 )
                 status = 200 if result.get("ok") else 502
@@ -422,10 +464,10 @@ class Handler(BaseHTTPRequestHandler):
                         "egress_id": eid,
                         "tap": tap,
                         "inject_note": (
-                            "Recent injects (audit) only prove the controller "
-                            "accepted the command. This probe reads the "
-                            "post-splice MPEG-TS feed with TSDuck — same path "
-                            "Listen uses after the ffmpeg remux drop fix."
+                            "Probe auto-fires a splice_start_immediate into "
+                            "tsp spliceinject mid-window (unless "
+                            "fire_test_splice=false). PMT-only without "
+                            "sections after that means inject is not on the wire."
                         ),
                     },
                 )

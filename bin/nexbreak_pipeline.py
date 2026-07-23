@@ -332,12 +332,19 @@ def tsp_splice_argv(
     TSDuck 3.4x requires --service OR (--pid AND --pts-pid). Using --service -
     selects the first PAT service so PTS/PCR PIDs are taken from that PMT
     (works for live remux without hardcoding a video PID).
+
+    spliceinject only replaces null packets (PID 0x1FFF), so input stuffing is
+    required. --min-inter-packet keeps the SCTE PID alive with splice_null so
+    Verify always has TID 0xFC traffic even between Roll presses.
     """
     scte_pid = int(channel.get("scte35_pid") or 500)
     out_host = resolve_local_feed_host(feed_host)
+    # Keep SCTE PID active without needing a known TS bitrate (live remux often
+    # reports bitrate=0, which makes --min-bitrate a no-op).
+    min_inter = int(os.environ.get("NEXBREAK_SCTE_MIN_INTER_PACKET", "400") or 400)
     argv = [
         tsp,
-        "--add-input-stuffing", "1/10",
+        "--add-input-stuffing", "1/8",
         "-I", "file", "-",
         "-P", "pmt",
         "--service", "-",
@@ -345,9 +352,11 @@ def tsp_splice_argv(
         "--add-pid", f"{scte_pid}/0x86",
         "-P", "spliceinject",
         "--service", "-",
+        "--pid", str(scte_pid),
         "--udp", f"127.0.0.1:{splice_udp_port}",
-        "--inject-count", "2",
-        "--inject-interval", "800",
+        "--inject-count", "3",
+        "--inject-interval", "500",
+        "--min-inter-packet", str(max(50, min_inter)),
         "-P", "filter", "--negate", "--pid", "0x1FFF",
         "-O", "ip", f"{out_host}:{int(feed_port)}",
     ]

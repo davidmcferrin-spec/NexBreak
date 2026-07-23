@@ -132,7 +132,24 @@
       }
     } else if (listening || live.listening) {
       bits.push(
-        '<span class="muted">Listening — fire a splice from Roll to confirm SCTE</span>'
+        '<span class="muted">Listening — auto-injects running; rows appear when TID 0xFC is seen</span>'
+      );
+    }
+    if (live.last_auto_inject_at) {
+      bits.push(
+        '<span class="badge dim">auto ' +
+          api.esc(String(live.last_auto_inject_type || "inject")) +
+          " " +
+          api.esc(ageLabel(live.last_auto_inject_at)) +
+          " id=" +
+          api.esc(String(live.last_auto_inject_event_id != null ? live.last_auto_inject_event_id : "—")) +
+          "</span>"
+      );
+    } else if ((listening || live.listening) && live.auto_inject_sec) {
+      bits.push(
+        '<span class="badge dim">auto-inject every ' +
+          api.esc(String(live.auto_inject_sec)) +
+          "s</span>"
       );
     }
     if (live.error) {
@@ -258,7 +275,7 @@
 
     if (!recent.length) {
       el.innerHTML =
-        '<div class="empty">No SCTE markers yet — Listen, then fire a splice from Roll.</div>';
+        '<div class="empty">No SCTE markers yet — Listen auto-fires test splices; waiting for TID 0xFC…</div>';
       return;
     }
 
@@ -484,7 +501,9 @@
     var btn = document.getElementById("btn-listen");
     btn.disabled = true;
     btn.textContent = "Starting…";
-    var r = await api.post("/v1/verify/" + selectedId + "/listen", {});
+    var r = await api.post("/v1/verify/" + selectedId + "/listen", {
+      auto_inject_sec: 12,
+    });
     btn.textContent = "Listen";
     if (!r.ok || !r.data || !r.data.ok) {
       btn.disabled = false;
@@ -498,10 +517,9 @@
     missCount = 0;
     setListeningUi(true);
     api.toast(
-      "Listening — " +
-        ((r.data.tap && r.data.tap.label) ||
-          (r.data.tap && r.data.tap.tap_kind) ||
-          "tap ok"),
+      "Listening until Stop — auto-inject every " +
+        (r.data.auto_inject_sec != null ? r.data.auto_inject_sec : 12) +
+        "s",
       "success"
     );
     if (r.data.tap) {
@@ -526,50 +544,6 @@
     }
     renderStatus(r.data && r.data.live);
     api.toast("Stopped", "success");
-  });
-
-  document.getElementById("btn-probe").addEventListener("click", async function () {
-    var item = currentItem();
-    if (!item) {
-      api.toast("Pick an output", "error");
-      return;
-    }
-    selectedId = Number(item.egress.id);
-    var btn = document.getElementById("btn-probe");
-    var box = document.getElementById("verify-probe");
-    btn.disabled = true;
-    btn.textContent = "Probing…";
-    box.innerHTML =
-      '<span class="muted">Running TSDuck on the post-splice feed (~8s) — fire a splice now if testing injection…</span>';
-    var r = await api.post("/v1/verify/" + selectedId + "/probe", { duration_s: 8 });
-    btn.disabled = false;
-    btn.textContent = "Probe feed";
-    if (!r.ok || !r.data || !r.data.ok) {
-      var err =
-        (r.data && r.data.error) ||
-        ("Probe failed (HTTP " + (r.status || "?") + ")");
-      box.innerHTML = '<span class="badge warn">' + api.esc(err) + "</span>";
-      api.toast(err, "error");
-      return;
-    }
-    var v = r.data.verdict || "?";
-    var okish = v === "scte_on_wire" || v === "sections_without_pmt";
-    var badge = okish ? "ok" : "warn";
-    box.innerHTML =
-      '<div><span class="badge ' +
-      badge +
-      '">' +
-      api.esc(v) +
-      "</span> " +
-      api.esc(r.data.summary || "") +
-      '</div><div class="muted" style="margin-top:4px">sections=' +
-      api.esc(String(r.data.section_count != null ? r.data.section_count : 0)) +
-      " · pmt_pids=" +
-      api.esc(JSON.stringify(r.data.pmt_scte_pids || [])) +
-      " · packets≈" +
-      api.esc(String(r.data.packets_seen != null ? r.data.packets_seen : 0)) +
-      "</div>";
-    api.toast(okish ? "SCTE on the feed" : r.data.summary || v, okish ? "success" : "error");
   });
 
   loadEgresses();

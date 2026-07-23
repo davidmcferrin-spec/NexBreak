@@ -8,12 +8,14 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
 
-from nexbreak_pipeline import resolve_local_feed_host, udp_mpegts_input_url
+from nexbreak_pipeline import resolve_local_feed_host, scte35_xml, udp_mpegts_input_url
 
 
 def run_dir() -> Path:
@@ -237,12 +239,23 @@ SCTE_PROBE_MARKER = "##scte##"
 PSI_PROBE_MARKER = "##psi##"
 
 
+def _udp_inject_scte_xml(xml: str, port: int) -> None:
+    """Send one TSDuck XML splice table to spliceinject's UDP listener."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(xml.encode("utf-8"), ("127.0.0.1", int(port)))
+    finally:
+        sock.close()
+
+
 def probe_scte_feed(
     feed_host: str,
     feed_port: int,
     *,
-    duration_s: float = 8.0,
+    duration_s: float = 10.0,
     scte_pid: Optional[int] = None,
+    splice_udp_port: Optional[int] = None,
+    fire_test_splice: bool = True,
 ) -> dict[str, Any]:
     """
     One-shot TSDuck probe of the post-splice local feed.
@@ -252,7 +265,9 @@ def probe_scte_feed(
       2) PMT declares an SCTE-35 PID (stream_type 0x86)
       3) splice_information_table sections (TID 0xFC) actually seen
 
-    Uses tsp -I ip (not ffmpeg remux) so 0x86 PIDs are not stripped.
+    When fire_test_splice is True and splice_udp_port is set, sends a
+    splice_start_immediate XML to tsp spliceinject mid-probe so the test does
+    not depend on manually hitting Roll in the same window.
     """
     tsp = shutil.which("tsp") or os.environ.get("NEXBREAK_TSP", "tsp")
     if not shutil.which("tsp") and not Path(str(tsp)).is_file():
@@ -260,7 +275,7 @@ def probe_scte_feed(
 
     dest = resolve_local_feed_host(feed_host)
     port = int(feed_port)
-    secs = max(3.0, min(30.0, float(duration_s)))
+    secs = max(5.0, min(30.0, float(duration_s)))
     argv = [
         str(tsp),
         "-I",
@@ -277,13 +292,48 @@ def probe_scte_feed(
         "psi",
         f"--log-xml-line={PSI_PROBE_MARKER}",
         "-P",
+        "count",
+        "--interval",
+        "2",
+        "-P",
         "until",
         f"--seconds={int(secs)}",
         "-O",
         "drop",
     ]
-    # scte_pid is reserved for future --pid narrowing; TID 0xFC already scans all PIDs.
     _ = scte_pid
+
+    test_event_id = int(time.time()) & 0x7FFFFFFF
+    inject_meta: dict[str, Any] = {
+        "attempted": False,
+        "ok": False,
+        "event_id": test_event_id,
+        "splice_udp_port": splice_udp_port,
+        "error": None,
+    }
+
+    def _fire() -> None:
+        time.sleep(max(1.5, secs * 0.25))
+        if not fire_test_splice or not splice_udp_port:
+            return
+        inject_meta["attempted"] = True
+        try:
+            xml = scte35_xml(
+                splice_type="splice_start_immediate",
+                event_id=test_event_id,
+            )
+            assert xml is not None
+            _udp_inject_scte_xml(xml, int(splice_udp_port))
+            # Immediate commands are inserted once; send a second copy in case
+            # the first datagram arrived before PTS lock.
+            time.sleep(0.4)
+            _udp_inject_scte_xml(xml, int(splice_udp_port))
+            inject_meta["ok"] = True
+        except Exception as exc:  # noqa: BLE001
+            inject_meta["error"] = str(exc)
+
+    starter = threading.Thread(target=_fire, name="scte-probe-inject", daemon=True)
+    starter.start()
 
     started = time.time()
     try:
@@ -292,7 +342,7 @@ def probe_scte_feed(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            timeout=secs + 5.0,
+            timeout=secs + 8.0,
             check=False,
         )
         err = (proc.stderr or b"").decode("utf-8", errors="replace")
@@ -303,6 +353,8 @@ def probe_scte_feed(
         return {"ok": False, "error": f"tsp not executable: {tsp}"}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)}
+    finally:
+        starter.join(timeout=1.0)
 
     sections: list[str] = []
     pmt_scte_pids: list[int] = []
@@ -331,7 +383,6 @@ def probe_scte_feed(
                     continue
                 if pid not in pmt_scte_pids:
                     pmt_scte_pids.append(pid)
-        # tsp count-like / until / ip plugin progress
         m = re.search(r"(\d[\d,]*)\s+packets?", line, re.I)
         if m:
             try:
@@ -339,11 +390,13 @@ def probe_scte_feed(
             except ValueError:
                 pass
 
-    # Heuristic: any non-empty stderr with "ip:" or "tsp:" and no fatal usually means traffic.
-    has_traffic = packets > 0 or "ip:" in err.lower() or bool(sections) or bool(pmt_scte_pids)
-    # Looser traffic detect: until plugin ran without "no input"
+    has_traffic = (
+        packets > 0 or bool(sections) or bool(pmt_scte_pids) or "ip:" in err.lower()
+    )
     if not has_traffic and proc is not None and proc.returncode == 0 and len(err) > 40:
         has_traffic = "error" not in err.lower()[:200]
+
+    saw_test = any(str(test_event_id) in s for s in sections)
 
     if not has_traffic and not sections and not pmt_scte_pids:
         verdict = "no_packets"
@@ -353,21 +406,47 @@ def probe_scte_feed(
         )
     elif pmt_scte_pids and not sections:
         verdict = "pmt_ok_no_sections"
-        summary = (
-            f"PMT declares SCTE-35 PID(s) {pmt_scte_pids} but no TID 0xFC "
-            f"sections in {secs:.0f}s — fire a splice from Roll while probing."
-        )
+        if inject_meta.get("attempted") and inject_meta.get("ok"):
+            summary = (
+                f"PMT declares SCTE-35 PID(s) {pmt_scte_pids} but no TID 0xFC "
+                f"after a test UDP inject to spliceinject :{splice_udp_port} "
+                f"(event_id={test_event_id}). spliceinject is not placing "
+                "sections on the feed — restart nexbreak-proc after deploy "
+                "(needs stuffing + PTS lock)."
+            )
+        elif inject_meta.get("attempted"):
+            summary = (
+                f"PMT has SCTE PID(s) {pmt_scte_pids}; test inject failed: "
+                f"{inject_meta.get('error')}"
+            )
+        else:
+            summary = (
+                f"PMT declares SCTE-35 PID(s) {pmt_scte_pids} but no TID 0xFC "
+                f"sections in {secs:.0f}s — no test inject was sent "
+                "(pass splice_udp_port / fire_test_splice)."
+            )
     elif sections and not pmt_scte_pids:
         verdict = "sections_without_pmt"
         summary = (
             f"Saw {len(sections)} SCTE section(s) but PMT 0x86 not parsed — "
-            "markers are on the wire; PMT XML may use a different attribute form."
+            "markers are on the wire."
         )
     elif sections:
         verdict = "scte_on_wire"
+        extra = ""
+        if inject_meta.get("attempted"):
+            extra = (
+                f" Test splice event_id={test_event_id} "
+                + (
+                    "seen."
+                    if saw_test
+                    else "sent but not matched in XML (null splices may dominate)."
+                )
+            )
         summary = (
             f"Confirmed: {len(sections)} SCTE-35 section(s) on feed "
             f"{dest}:{port}; PMT SCTE PID(s)={pmt_scte_pids or 'unparsed'}."
+            + extra
         )
     else:
         verdict = "pmt_missing"
@@ -389,4 +468,6 @@ def probe_scte_feed(
         "section_count": len(sections),
         "section_samples": sections[:5],
         "tsp_rc": None if proc is None else proc.returncode,
+        "test_inject": inject_meta,
+        "test_event_seen": saw_test,
     }

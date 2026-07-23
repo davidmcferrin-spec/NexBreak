@@ -731,15 +731,6 @@ td.bad { color: var(--bad); }
   text-align: left;
 }
 
-.verify-listen #verify-probe:empty {
-  display: none;
-}
-
-.verify-listen #verify-probe:not(:empty) {
-  margin-top: 8px;
-  font-size: 12px;
-}
-
 .verify-compare {
   flex: 1 1 auto;
   display: grid;

@@ -15,7 +15,9 @@ Pipeline (feed tap — preferred):
 Pipeline (SRT return tap — fallback only):
   tsp -I srt --caller … (same tables plugin), else ffmpeg|tsp as last resort.
 
-Spawned on-demand by nexbreak-verify (Verify page). Stdlib only.
+Spawned on-demand by nexbreak-verify (Verify → Listen). Runs until Stop.
+Optional --auto-inject-sec fires test splices into spliceinject for the
+whole listen session so Sent/Received fill without Roll or Probe.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -37,8 +40,8 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from nexbreak_db import connect, migrate  # noqa: E402
-from nexbreak_pipeline import resolve_local_feed_host  # noqa: E402
+from nexbreak_db import audit, connect, migrate  # noqa: E402
+from nexbreak_pipeline import resolve_local_feed_host, scte35_xml  # noqa: E402
 from nexbreak_verify import (  # noqa: E402
     atomic_write_json,
     empty_scte_state,
@@ -319,6 +322,76 @@ def build_tsp_srt_argv(tsp: str, *, caller: str) -> list[str]:
     ]
 
 
+def _udp_inject(xml: str, port: int) -> None:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(xml.encode("utf-8"), ("127.0.0.1", int(port)))
+    finally:
+        sock.close()
+
+
+def _auto_inject_loop(
+    *,
+    splice_udp_port: int,
+    interval_s: float,
+    first_delay_s: float,
+    processing_channel_id: Optional[int],
+    egress_id: int,
+    conn,
+    lock: threading.Lock,
+    bump_state: Callable[..., None],
+) -> None:
+    """
+    While listening, periodically fire splice_start/end_immediate into
+    spliceinject so Verify proves the path without Roll or a separate Probe.
+    """
+    time.sleep(max(0.5, first_delay_s))
+    event_id = (int(time.time()) & 0x0FFFFFFF) + 0x50000000
+    out_of_network = True
+    while not _stop:
+        st = "splice_start_immediate" if out_of_network else "splice_end_immediate"
+        eid = event_id
+        event_id = (event_id + 1) & 0x7FFFFFFF
+        try:
+            xml = scte35_xml(splice_type=st, event_id=eid)
+            assert xml is not None
+            _udp_inject(xml, splice_udp_port)
+            time.sleep(0.25)
+            _udp_inject(xml, splice_udp_port)
+            detail = (
+                f"verify auto-inject xml event_id={eid} → udp/{splice_udp_port}"
+            )
+            if conn is not None:
+                try:
+                    with lock:
+                        audit(
+                            conn,
+                            event_type="splice_command",
+                            result="success",
+                            processing_channel_id=processing_channel_id,
+                            egress_channel_id=egress_id,
+                            splice_type=st,
+                            source_ip="127.0.0.1",
+                            detail=detail,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("auto-inject audit failed: %s", exc)
+            bump_state(
+                last_auto_inject_at=time.time(),
+                last_auto_inject_event_id=eid,
+                last_auto_inject_type=st,
+                error=None,
+            )
+            log.info("auto-inject %s event_id=%s udp/%s", st, eid, splice_udp_port)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("auto-inject failed: %s", exc)
+            bump_state(error=f"auto-inject failed: {exc}")
+        out_of_network = not out_of_network
+        end = time.time() + max(5.0, interval_s)
+        while not _stop and time.time() < end:
+            time.sleep(0.2)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="NexBreak SCTE return-feed watch")
     parser.add_argument("--egress-id", type=int, required=True)
@@ -330,6 +403,24 @@ def main() -> int:
     parser.add_argument("--processing-channel-id", type=int, default=0)
     parser.add_argument("--delay-ms", type=int, default=2000)
     parser.add_argument("--db", default=None)
+    parser.add_argument(
+        "--splice-udp-port",
+        type=int,
+        default=0,
+        help="If set with --auto-inject-sec>0, fire test splices into spliceinject",
+    )
+    parser.add_argument(
+        "--auto-inject-sec",
+        type=float,
+        default=0.0,
+        help="Seconds between verify test splices (0=off). Default off; Listen enables ~12s.",
+    )
+    parser.add_argument(
+        "--auto-inject-first-delay-sec",
+        type=float,
+        default=2.5,
+        help="Delay before the first auto-inject after watch start",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -544,6 +635,34 @@ def main() -> int:
         mode,
         args.tap_url,
     )
+
+    auto_thread = None
+    auto_sec = float(args.auto_inject_sec or 0)
+    splice_udp = int(args.splice_udp_port or 0)
+    if auto_sec > 0 and splice_udp > 0:
+        bump_state(auto_inject_sec=auto_sec, auto_inject_udp=splice_udp)
+        auto_thread = threading.Thread(
+            target=_auto_inject_loop,
+            kwargs={
+                "splice_udp_port": splice_udp,
+                "interval_s": auto_sec,
+                "first_delay_s": float(args.auto_inject_first_delay_sec or 2.5),
+                "processing_channel_id": args.processing_channel_id or None,
+                "egress_id": eid,
+                "conn": conn,
+                "lock": lock,
+                "bump_state": bump_state,
+            },
+            name="scte-auto-inject",
+            daemon=True,
+        )
+        auto_thread.start()
+        log.info(
+            "auto-inject enabled every %.1fs via udp/%s (first in %.1fs)",
+            auto_sec,
+            splice_udp,
+            float(args.auto_inject_first_delay_sec or 2.5),
+        )
 
     try:
         while not _stop:
