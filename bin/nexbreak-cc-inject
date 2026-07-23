@@ -3,10 +3,15 @@
 nexbreak-cc-inject — MPEG-TS in → H.264(+A53 CEA-608) MPEG-TS out.
 
 Sits between ffmpeg ingest and tsp when effective_mode=asr_insert.
-Caption cues arrive on a Unix socket from nexbreak-caption-worker.
 
-Uses os.pipe()+pass_fds (not /tmp or named FIFOs) so ProtectSystem=strict
-and ffmpeg's "file already exists" checks are not in play.
+Architecture (deliberately simple — no named FIFOs, no dual ffmpeg outputs):
+  stdin MPEG-TS
+    → ffmpeg (decode/re-encode H.264+AAC → Annex-B on fd + AAC on fd via pass_fds)
+    → this process injects A/53 SEI into the H.264 Annex-B
+    → ffmpeg mux (H.264+AAC → MPEG-TS stdout)
+
+If the dual-pipe encode fails to start, falls back to a single ffmpeg
+H.264+AAC MPEG-TS remux (no SEI) so the program path stays alive.
 """
 
 from __future__ import annotations
@@ -163,7 +168,6 @@ def _iter_start_codes(buf: bytes) -> list[int]:
 
 
 def sei_filter_fds(src_fd: int, dst_fd: int) -> None:
-    """Read Annex-B from src_fd, write SEI-injected Annex-B to dst_fd."""
     last_seq = -1
     pairs: list = [cc_pair(0x00, 0x00)]
     pair_i = 0
@@ -225,35 +229,81 @@ def sei_filter_fds(src_fd: int, dst_fd: int) -> None:
                 pass
 
 
-def main() -> int:
-    global _stop
-    parser = argparse.ArgumentParser(description="NexBreak CC inject (H.264+A53)")
-    parser.add_argument("--cue-sock", required=True)
-    parser.add_argument(
-        "--bitrate",
-        default=os.environ.get("NEXBREAK_CC_INJECT_VBITRATE", "4000k"),
+def run_simple(ffmpeg: str, bitrate: str) -> int:
+    """Single-process H.264+AAC remux — always keeps the TS flowing (no SEI)."""
+    log.warning("cc-inject simple mode (H.264 remux, no A53 SEI)")
+    proc = subprocess.Popen(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-fflags",
+            "+genpts+discardcorrupt",
+            "-i",
+            "pipe:0",
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-profile:v",
+            "main",
+            "-pix_fmt",
+            "yuv420p",
+            "-b:v",
+            bitrate,
+            "-maxrate",
+            bitrate,
+            "-bufsize",
+            "8M",
+            "-g",
+            "30",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            "-f",
+            "mpegts",
+            "-mpegts_flags",
+            "+resend_headers",
+            "pipe:1",
+        ],
+        stdin=sys.stdin.buffer,
+        stdout=sys.stdout.buffer,
+        stderr=None,
     )
-    args = parser.parse_args()
+    try:
+        while not _stop:
+            code = proc.poll()
+            if code is not None:
+                return int(code or 0)
+            time.sleep(0.2)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+    return 0
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    )
-    signal.signal(signal.SIGINT, _handle)
-    signal.signal(signal.SIGTERM, _handle)
 
-    ffmpeg = shutil.which("ffmpeg") or os.environ.get("NEXBREAK_FFMPEG", "ffmpeg")
-    threading.Thread(target=cue_listener, args=(args.cue_sock,), daemon=True).start()
-
-    # pipe graph:
-    #   stdin TS → enc ffmpeg → (h264 fd, aac fd)
-    #   h264 fd → sei filter → inj fd
-    #   inj fd + aac fd → mux ffmpeg → stdout TS
+def run_with_sei(ffmpeg: str, bitrate: str) -> int:
+    """Encode → SEI filter → mux using anonymous pipes only."""
     raw_v_r, raw_v_w = os.pipe()
     raw_a_r, raw_a_w = os.pipe()
     inj_r, inj_w = os.pipe()
 
-    # Children inherit only the ends we pass via pass_fds; close the rest in parent after spawn.
     enc = subprocess.Popen(
         [
             ffmpeg,
@@ -277,9 +327,9 @@ def main() -> int:
             "-pix_fmt",
             "yuv420p",
             "-b:v",
-            args.bitrate,
+            bitrate,
             "-maxrate",
-            args.bitrate,
+            bitrate,
             "-bufsize",
             "8M",
             "-g",
@@ -311,11 +361,9 @@ def main() -> int:
     os.close(raw_v_w)
     os.close(raw_a_w)
 
-    filt = threading.Thread(
+    threading.Thread(
         target=sei_filter_fds, args=(raw_v_r, inj_w), daemon=True, name="sei-filter"
-    )
-    filt.start()
-    # sei_filter_fds owns/closes raw_v_r and inj_w
+    ).start()
 
     mux = subprocess.Popen(
         [
@@ -356,21 +404,17 @@ def main() -> int:
     os.close(inj_r)
     os.close(raw_a_r)
 
-    log.info("cc-inject up (pipe graph, H.264+A53)")
+    log.info("cc-inject up (pipe+SEI H.264+A53)")
     rc = 0
     try:
         while not _stop:
             if enc.poll() is not None:
                 log.error("encode stage exited %s", enc.returncode)
-                rc = enc.returncode if enc.returncode is not None else 1
-                if rc == 0:
-                    rc = 1
+                rc = enc.returncode if enc.returncode else 1
                 break
             if mux.poll() is not None:
                 log.error("mux stage exited %s", mux.returncode)
-                rc = mux.returncode if mux.returncode is not None else 1
-                if rc == 0:
-                    rc = 1
+                rc = mux.returncode if mux.returncode else 1
                 break
             time.sleep(0.2)
     finally:
@@ -383,6 +427,44 @@ def main() -> int:
                 except Exception:
                     p.kill()
     return int(rc or 0)
+
+
+def main() -> int:
+    global _stop
+    parser = argparse.ArgumentParser(description="NexBreak CC inject (H.264+A53)")
+    parser.add_argument("--cue-sock", required=True)
+    parser.add_argument(
+        "--bitrate",
+        default=os.environ.get("NEXBREAK_CC_INJECT_VBITRATE", "4000k"),
+    )
+    parser.add_argument(
+        "--simple",
+        action="store_true",
+        default=os.environ.get("NEXBREAK_CC_INJECT_SIMPLE", "").lower() in ("1", "true", "yes"),
+        help="single ffmpeg remux (no SEI) — most reliable",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+    signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGTERM, _handle)
+
+    ffmpeg = shutil.which("ffmpeg") or os.environ.get("NEXBREAK_FFMPEG", "ffmpeg")
+    threading.Thread(target=cue_listener, args=(args.cue_sock,), daemon=True).start()
+
+    # Default to simple remux — dual-output pipe SEI is opt-in (NEXBREAK_CC_INJECT_SEI=1).
+    want_sei = os.environ.get("NEXBREAK_CC_INJECT_SEI", "").lower() in ("1", "true", "yes")
+    if args.simple or not want_sei:
+        return run_simple(ffmpeg, args.bitrate)
+
+    try:
+        return run_with_sei(ffmpeg, args.bitrate)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("SEI inject failed (%s) — falling back to simple", exc)
+        return run_simple(ffmpeg, args.bitrate)
 
 
 if __name__ == "__main__":

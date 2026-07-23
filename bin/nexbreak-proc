@@ -34,6 +34,7 @@ from nexbreak_caption_policy import (  # noqa: E402
     enabled_from_policy,
     normalize_policy,
     probe_source_has_cc,
+    vosk_ready,
 )
 from nexbreak_captions import CaptionSidecar  # noqa: E402
 from nexbreak_db import (  # noqa: E402
@@ -89,7 +90,9 @@ def _policy() -> str:
 
 def _refresh_effective_mode() -> str:
     global _effective_mode
-    _effective_mode = effective_mode(_policy(), _source_has_cc)
+    _effective_mode = effective_mode(
+        _policy(), _source_has_cc, asr_available=vosk_ready()
+    )
     return _effective_mode
 
 
@@ -314,7 +317,9 @@ def _watch_pipeline() -> Optional[int]:
             except Exception as exc:  # noqa: BLE001
                 log.warning("CC re-probe failed: %s", exc)
             else:
-                new_mode = effective_mode("auto", _source_has_cc)
+                new_mode = effective_mode(
+                    "auto", _source_has_cc, asr_available=vosk_ready()
+                )
                 if new_mode != _effective_mode or prev != _source_has_cc:
                     log.info(
                         "CC probe changed source_has_cc %s→%s — scheduling restart",

@@ -37,11 +37,17 @@ def cue_sock_path(service_name: str) -> str:
     return os.path.join(base, f"cc-{service_name}.sock")
 
 
-def effective_mode(policy: str, source_has_cc: bool) -> str:
+def vosk_ready() -> bool:
+    """True when a model dir is configured and present (ASR can produce text)."""
+    model = (os.environ.get("NEXBREAK_VOSK_MODEL") or "").strip()
+    return bool(model) and os.path.isdir(model)
+
+
+def effective_mode(policy: str, source_has_cc: bool, *, asr_available: Optional[bool] = None) -> str:
     """
     off         → off (no ASR; remux may still carry source CC)
     auto+has_cc → preserve
-    auto+!cc    → asr_insert
+    auto+!cc    → asr_insert only if Vosk model is configured; else preserve
     force_asr   → asr_insert
     """
     p = normalize_policy(policy)
@@ -50,7 +56,17 @@ def effective_mode(policy: str, source_has_cc: bool) -> str:
     if p == "force_asr":
         return "asr_insert"
     # auto
-    return "preserve" if source_has_cc else "asr_insert"
+    if source_has_cc:
+        return "preserve"
+    if asr_available is None:
+        asr_available = vosk_ready()
+    if not asr_available:
+        log.info(
+            "auto policy, no source CC, but NEXBREAK_VOSK_MODEL unset/missing — "
+            "preserving remux (set model or Force ASR to enable inject)"
+        )
+        return "preserve"
+    return "asr_insert"
 
 
 def probe_source_has_cc(channel: dict[str, Any], timeout: float = 8.0) -> bool:
