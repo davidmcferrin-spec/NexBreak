@@ -172,6 +172,7 @@ def cue_to_udp_bridge(sock_path: str, udp_host: str, udp_port: int) -> None:
 
 def run_simple(ffmpeg: str, bitrate: str) -> int:
     """Remux without captions — last-resort path-alive mode."""
+    global _stop
     log.warning(
         "cc-inject simple remux (NO CEA-608) — install cc_injector: "
         "sudo bash scripts/install-ubuntu.sh cc-injector"
@@ -251,6 +252,7 @@ def run_lce(
     bootstrap: bool,
     linger_ms: int,
 ) -> int:
+    global _stop
     host, port = parse_cc_udp(cc_udp)
     bridge = threading.Thread(
         target=cue_to_udp_bridge,
