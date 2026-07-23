@@ -5,53 +5,54 @@ $activeNav = 'verify';
 $pageScript = '/assets/pages/verify.js';
 require __DIR__ . '/include/header.php';
 ?>
-<div class="page-header">
-  <div>
-    <h1>Verify</h1>
-    <p class="sub">Return-feed SCTE-35 check — listen to an egress and confirm markers on the bitstream</p>
+<div class="verify-page">
+  <div class="page-header verify-header">
+    <div>
+      <h1>Verify</h1>
+      <p class="sub">Correlate SCTE sent (controller) vs received (bitstream) — latest at the top of each table</p>
+    </div>
   </div>
+
+  <section class="panel verify-listen">
+    <div class="panel-head">
+      <h2>Listen</h2>
+      <div class="bar" style="margin:0; flex-wrap:wrap; gap:8px">
+        <label style="display:flex; align-items:center; gap:8px">
+          Output
+          <select id="verify-egress" style="min-width:200px"></select>
+        </label>
+        <button type="button" class="primary" id="btn-listen">Listen</button>
+        <button type="button" id="btn-stop" disabled>Stop</button>
+        <button type="button" id="btn-probe">Probe feed</button>
+        <button type="button" id="btn-refresh">Refresh</button>
+      </div>
+    </div>
+    <div id="verify-tap" class="muted verify-meta">Select an output to see the tap source.</div>
+    <div id="verify-status" class="empty">Not listening</div>
+    <div id="verify-probe" class="muted"></div>
+  </section>
+
+  <section class="verify-compare" aria-label="Sent vs received SCTE">
+    <div class="panel verify-col">
+      <div class="panel-head">
+        <h2>Sent</h2>
+        <span class="panel-meta" id="verify-injects-meta">controller → spliceinject</span>
+      </div>
+      <p class="muted verify-col-hint">Commands accepted for the routed input. Match by Event ID to Received.</p>
+      <div id="verify-injects" class="verify-scroll">
+        <div class="empty">No recent splice commands</div>
+      </div>
+    </div>
+    <div class="panel verify-col">
+      <div class="panel-head">
+        <h2>Received</h2>
+        <span class="panel-meta" id="verify-events-meta">TSDuck on tap</span>
+      </div>
+      <p class="muted verify-col-hint">TID 0xFC on the post-splice feed. Empty while Sent succeeds means markers are not on the wire.</p>
+      <div id="verify-events" class="verify-scroll">
+        <div class="empty">Start listening, then fire a splice from Roll.</div>
+      </div>
+    </div>
+  </section>
 </div>
-
-<section class="panel">
-  <h2>Listen</h2>
-  <p class="warn-banner" style="margin-bottom:12px">
-    Verify taps the routed post-splice local feed with <strong>TSDuck</strong>
-    (not ffmpeg remux — that was dropping SCTE-35 PIDs and looking like “no markers”).
-    Status should show <strong>listening</strong> / <strong>stream locked</strong>,
-    then fire a splice from Roll. Use <strong>Probe feed</strong> for a one-shot
-    PMT + TID&nbsp;0xFC check that separates inject-accepted from markers-on-wire.
-  </p>
-  <div class="bar" style="margin-bottom:12px; flex-wrap:wrap; gap:8px">
-    <label style="display:flex; align-items:center; gap:8px">
-      Output
-      <select id="verify-egress" style="min-width:220px"></select>
-    </label>
-    <button type="button" class="primary" id="btn-listen">Listen</button>
-    <button type="button" id="btn-stop" disabled>Stop</button>
-    <button type="button" id="btn-probe">Probe feed</button>
-    <button type="button" id="btn-refresh">Refresh</button>
-  </div>
-  <div id="verify-tap" class="muted" style="margin-bottom:10px">Select an output to see the tap source.</div>
-  <div id="verify-status" class="empty">Not listening</div>
-  <div id="verify-probe" class="muted" style="margin-top:10px"></div>
-</section>
-
-<section class="panel">
-  <h2>Recent injects</h2>
-  <p class="muted" style="margin-bottom:8px">
-    Controller audit only — proves the command was accepted and sent to
-    <code>spliceinject</code>, <em>not</em> that markers are on the bitstream.
-  </p>
-  <div id="verify-injects"><div class="empty">No recent splice commands</div></div>
-</section>
-
-<section class="panel">
-  <h2>SCTE sightings (bitstream)</h2>
-  <p class="muted" style="margin-bottom:8px">
-    TSDuck saw TID&nbsp;0xFC on the tap. Empty here while injects succeed usually
-    meant the old ffmpeg remux path; after redeploy, empty means markers are
-    not on the feed.
-  </p>
-  <div id="verify-events"><div class="empty">Start listening, then fire a splice from Roll.</div></div>
-</section>
 <?php require __DIR__ . '/include/footer.php'; ?>

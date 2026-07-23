@@ -6,6 +6,9 @@
   var listening = false;
   var pollTimer = null;
   var missCount = 0;
+  var lastInjectIds = "";
+  var lastEventIds = "";
+  var focusEventId = null;
 
   function sel() {
     return document.getElementById("verify-egress");
@@ -19,12 +22,48 @@
     return null;
   }
 
+  function routedProcId() {
+    var item = currentItem();
+    if (!item || !item.processing) return null;
+    return Number(item.processing.id) || null;
+  }
+
   function ageLabel(ts) {
     if (!ts) return "—";
     var s = Math.max(0, Math.floor(Date.now() / 1000 - Number(ts)));
     if (s < 60) return s + "s ago";
     if (s < 3600) return Math.floor(s / 60) + "m ago";
     return Math.floor(s / 3600) + "h ago";
+  }
+
+  function eventKey(v) {
+    if (v == null || v === "" || v === "—") return "";
+    return String(v);
+  }
+
+  function bindFocusRows(root) {
+    if (!root) return;
+    root.querySelectorAll("tr[data-event-id]").forEach(function (tr) {
+      tr.addEventListener("mouseenter", function () {
+        focusEventId = tr.getAttribute("data-event-id") || null;
+        paintFocus();
+      });
+      tr.addEventListener("mouseleave", function () {
+        focusEventId = null;
+        paintFocus();
+      });
+    });
+  }
+
+  function paintFocus() {
+    document.querySelectorAll(".verify-scroll tr[data-event-id]").forEach(function (tr) {
+      var eid = tr.getAttribute("data-event-id") || "";
+      if (focusEventId && eid === focusEventId) {
+        tr.classList.add("verify-focus");
+      } else {
+        tr.classList.remove("verify-focus");
+      }
+    });
   }
 
   function renderTap() {
@@ -103,17 +142,44 @@
     el.innerHTML = bits.join(" ");
   }
 
-  function renderInjects(events) {
+  function setMeta(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+
+  function renderInjects(events, matchedIds) {
     var el = document.getElementById("verify-injects");
     if (!el) return;
     events = events || [];
+    matchedIds = matchedIds || {};
+    var sig = events
+      .map(function (e) {
+        return String(e.id || "") + ":" + String(e.occurred_at || "");
+      })
+      .join("|");
+    if (sig === lastInjectIds && el.querySelector("table")) {
+      // Still refresh relative ages / match classes cheaply via full redraw when needed.
+    }
+    lastInjectIds = sig;
+
+    var proc = currentItem() && currentItem().processing;
+    setMeta(
+      "verify-injects-meta",
+      (events.length ? events.length + " · " : "") +
+        (proc ? proc.name : "all channels")
+    );
+
     if (!events.length) {
-      el.innerHTML = '<div class="empty">No recent splice commands</div>';
+      el.innerHTML =
+        '<div class="empty">No splice commands' +
+        (proc ? " for " + api.esc(proc.name) : "") +
+        "</div>";
       return;
     }
+
     el.innerHTML =
       '<table class="data"><thead><tr>' +
-      "<th>When</th><th>Channel</th><th>Type</th><th>Event</th><th>Result</th><th>Detail</th>" +
+      "<th>When</th><th>Event</th><th>Type</th><th>Result</th><th>Channel</th>" +
       "</tr></thead><tbody>" +
       events
         .map(function (e) {
@@ -121,83 +187,173 @@
             ? Date.parse(String(e.occurred_at).replace(" ", "T") + "Z") / 1000
             : null;
           var eidMatch = String(e.detail || "").match(/event_id=(\d+)/);
-          var eventId = eidMatch ? eidMatch[1] : "—";
+          var eventId = eidMatch ? eidMatch[1] : "";
+          var matched = eventId && matchedIds[eventId];
+          var rowClass = matched ? " verify-matched" : "";
           return (
-            "<tr><td>" +
+            '<tr class="' +
+            rowClass.trim() +
+            '"' +
+            (eventId ? ' data-event-id="' + api.esc(eventId) + '"' : "") +
+            "><td>" +
             api.esc(ageLabel(ts)) +
             "</td><td>" +
-            api.esc(e.processing_name || String(e.processing_channel_id || "—")) +
+            api.esc(eventId || "—") +
             "</td><td>" +
             api.esc(e.splice_type || "—") +
-            "</td><td>" +
-            api.esc(eventId) +
             "</td><td>" +
             (e.result === "success"
               ? '<span class="badge ok">ok</span>'
               : '<span class="badge bad">' + api.esc(e.result || "?") + "</span>") +
-            '</td><td class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
-            api.esc(String(e.detail || "").slice(0, 100)) +
+            '</td><td class="clip muted">' +
+            api.esc(e.processing_name || String(e.processing_channel_id || "—")) +
             "</td></tr>"
           );
         })
         .join("") +
       "</tbody></table>";
+    bindFocusRows(el);
+    paintFocus();
   }
 
-  async function loadInjects() {
-    var r = await api.get("/v1/audit?event_type=splice_command&limit=20");
-    if (!r.ok || !r.data) return;
-    renderInjects(r.data.events || []);
-  }
-
-  function renderEvents(live, sightings) {
-    var el = document.getElementById("verify-events");
+  function normalizeSightings(live, sightings) {
     var recent = (live && live.recent) || [];
     if (!recent.length && sightings && sightings.length) {
       recent = sightings.map(function (s) {
         return {
-          ts: s.seen_at ? Date.parse(String(s.seen_at).replace(" ", "T") + "Z") / 1000 : null,
+          ts: s.seen_at
+            ? Date.parse(String(s.seen_at).replace(" ", "T") + "Z") / 1000
+            : null,
           event_id: s.event_id,
           splice_type: s.splice_type,
-          out_of_network: s.out_of_network == null ? null : !!Number(s.out_of_network),
+          out_of_network:
+            s.out_of_network == null ? null : !!Number(s.out_of_network),
           verified: !!Number(s.verified),
           raw_snip: s.raw_snip,
         };
       });
     }
+    // Newest first (live.recent is already newest-first; DB sightings may need sort).
+    recent = recent.slice().sort(function (a, b) {
+      return Number(b.ts || 0) - Number(a.ts || 0);
+    });
+    return recent;
+  }
+
+  function renderEvents(live, sightings, matchedIds) {
+    var el = document.getElementById("verify-events");
+    var recent = normalizeSightings(live, sightings);
+    matchedIds = matchedIds || {};
+    var sig = recent
+      .map(function (e) {
+        return String(e.event_id || "") + ":" + String(e.ts || "");
+      })
+      .join("|");
+    lastEventIds = sig;
+
+    setMeta(
+      "verify-events-meta",
+      (recent.length ? recent.length + " · " : "") + "bitstream"
+    );
+
     if (!recent.length) {
       el.innerHTML =
-        '<div class="empty">No SCTE markers yet — trigger a splice on the routed input from Roll.</div>';
+        '<div class="empty">No SCTE markers yet — Listen, then fire a splice from Roll.</div>';
       return;
     }
+
     el.innerHTML =
       '<table class="data"><thead><tr>' +
-      "<th>When</th><th>Event</th><th>Type</th><th>OON</th><th>Audit match</th><th>Snippet</th>" +
+      "<th>When</th><th>Event</th><th>Type</th><th>OON</th><th>Match</th>" +
       "</tr></thead><tbody>" +
       recent
         .map(function (e) {
+          var eid = eventKey(e.event_id);
           var oon =
-            e.out_of_network === true ? "yes" : e.out_of_network === false ? "no" : "—";
+            e.out_of_network === true
+              ? "yes"
+              : e.out_of_network === false
+                ? "no"
+                : "—";
+          var matched = (eid && matchedIds[eid]) || !!e.verified;
+          var rowClass = matched ? " verify-matched" : "";
           return (
-            "<tr><td>" +
+            '<tr class="' +
+            rowClass.trim() +
+            '"' +
+            (eid ? ' data-event-id="' + api.esc(eid) + '"' : "") +
+            "><td>" +
             api.esc(ageLabel(e.ts)) +
             "</td><td>" +
-            api.esc(String(e.event_id != null ? e.event_id : "—")) +
+            api.esc(eid || "—") +
             "</td><td>" +
             api.esc(String(e.splice_type || "—")) +
             "</td><td>" +
             api.esc(oon) +
             "</td><td>" +
-            (e.verified
-              ? '<span class="badge ok">matched</span>'
+            (matched
+              ? '<span class="badge ok">sent</span>'
               : '<span class="badge dim">—</span>') +
-            "</td><td class=\"muted\" style=\"max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\">" +
-            api.esc(String(e.raw_snip || "").slice(0, 80)) +
             "</td></tr>"
           );
         })
         .join("") +
       "</tbody></table>";
+    bindFocusRows(el);
+    paintFocus();
+  }
+
+  function matchMapFrom(injects, sightings) {
+    var sent = {};
+    var recv = {};
+    (injects || []).forEach(function (e) {
+      var m = String(e.detail || "").match(/event_id=(\d+)/);
+      if (m) sent[m[1]] = true;
+    });
+    (sightings || []).forEach(function (e) {
+      var eid = eventKey(e.event_id);
+      if (eid) recv[eid] = true;
+    });
+    var both = {};
+    Object.keys(sent).forEach(function (k) {
+      if (recv[k]) both[k] = true;
+    });
+    return both;
+  }
+
+  var cachedInjects = [];
+  var cachedSightings = [];
+  var cachedLive = {};
+
+  function redrawTables() {
+    var matched = matchMapFrom(cachedInjects, cachedSightings.length
+      ? cachedSightings
+      : normalizeSightings(cachedLive, []));
+    // Also treat live.recent event ids as received.
+    normalizeSightings(cachedLive, cachedSightings).forEach(function (e) {
+      var eid = eventKey(e.event_id);
+      if (!eid) return;
+      var m = String(
+        (cachedInjects || [])
+          .map(function (x) {
+            return x.detail || "";
+          })
+          .join("\n")
+      );
+      if (m.indexOf("event_id=" + eid) >= 0) matched[eid] = true;
+    });
+    renderInjects(cachedInjects, matched);
+    renderEvents(cachedLive, cachedSightings, matched);
+  }
+
+  async function loadInjects() {
+    var q = "/v1/audit?event_type=splice_command&limit=40";
+    var pcid = routedProcId();
+    if (pcid) q += "&processing_channel_id=" + encodeURIComponent(String(pcid));
+    var r = await api.get(q);
+    if (!r.ok || !r.data) return;
+    cachedInjects = r.data.events || [];
+    redrawTables();
   }
 
   function setListeningUi(on) {
@@ -225,19 +381,17 @@
         missCount = 0;
       } else {
         missCount += 1;
-        // Require a few consecutive misses so a brief restart doesn't flip the UI.
         if (missCount >= 5) {
           setListeningUi(false);
           stopPoll();
-          api.toast(
-            (live && live.error) || "Verify watch stopped",
-            "error"
-          );
+          api.toast((live && live.error) || "Verify watch stopped", "error");
         }
       }
     }
+    cachedLive = live;
+    cachedSightings = r.data.sightings || [];
     renderStatus(live);
-    renderEvents(live, r.data.sightings);
+    redrawTables();
     loadInjects();
   }
 
@@ -294,6 +448,7 @@
     }
     selectedId = Number(box.value) || null;
     renderTap();
+    loadInjects();
     var cur = currentItem();
     if (cur && cur.listening) {
       setListeningUi(true);
@@ -306,11 +461,13 @@
   document.getElementById("verify-egress").addEventListener("change", function () {
     selectedId = Number(sel().value) || null;
     renderTap();
+    loadInjects();
   });
 
   document.getElementById("btn-refresh").addEventListener("click", function () {
     loadEgresses();
     if (listening) pollLive();
+    else loadInjects();
   });
 
   document.getElementById("btn-listen").addEventListener("click", async function () {
@@ -341,7 +498,10 @@
     missCount = 0;
     setListeningUi(true);
     api.toast(
-      "Listening — " + ((r.data.tap && r.data.tap.label) || (r.data.tap && r.data.tap.tap_kind) || "tap ok"),
+      "Listening — " +
+        ((r.data.tap && r.data.tap.label) ||
+          (r.data.tap && r.data.tap.tap_kind) ||
+          "tap ok"),
       "success"
     );
     if (r.data.tap) {
@@ -385,23 +545,24 @@
     btn.disabled = false;
     btn.textContent = "Probe feed";
     if (!r.ok || !r.data || !r.data.ok) {
-      var err = (r.data && r.data.error) || ("Probe failed (HTTP " + (r.status || "?") + ")");
+      var err =
+        (r.data && r.data.error) ||
+        ("Probe failed (HTTP " + (r.status || "?") + ")");
       box.innerHTML = '<span class="badge warn">' + api.esc(err) + "</span>";
       api.toast(err, "error");
       return;
     }
     var v = r.data.verdict || "?";
     var okish = v === "scte_on_wire" || v === "sections_without_pmt";
-    var badge = okish ? "ok" : v === "pmt_ok_no_sections" ? "warn" : "warn";
+    var badge = okish ? "ok" : "warn";
     box.innerHTML =
-      '<div style="margin-top:4px">' +
-      '<span class="badge ' +
+      '<div><span class="badge ' +
       badge +
       '">' +
       api.esc(v) +
       "</span> " +
       api.esc(r.data.summary || "") +
-      '</div><div class="muted" style="margin-top:6px">sections=' +
+      '</div><div class="muted" style="margin-top:4px">sections=' +
       api.esc(String(r.data.section_count != null ? r.data.section_count : 0)) +
       " · pmt_pids=" +
       api.esc(JSON.stringify(r.data.pmt_scte_pids || [])) +
@@ -412,6 +573,5 @@
   });
 
   loadEgresses();
-  loadInjects();
   setInterval(loadInjects, 5000);
 })();
