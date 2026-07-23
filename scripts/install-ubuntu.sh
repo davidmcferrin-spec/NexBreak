@@ -144,6 +144,11 @@ cmd_install() {
       exit 1
     fi
   fi
+  # Local MPEG-TS feed uses 239.255.98.0/24 so preview/egress/cc-watch each
+  # receive a full copy (unicast UDP + SO_REUSEADDR only delivers to one socket).
+  ip link set lo multicast on 2>/dev/null || true
+  ip route replace 239.255.98.0/24 dev lo 2>/dev/null || \
+    echo "WARN: could not add lo route for 239.255.98.0/24 (preview fan-out)" >&2
   systemctl daemon-reload
   systemctl reload apache2 || true
   echo "Installed under $PREFIX (DocumentRoot $PREFIX/web, DB $DATA)"

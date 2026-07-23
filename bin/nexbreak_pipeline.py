@@ -5,6 +5,9 @@ Pipeline builders for nexbreak-proc / nexbreak-egress.
 ffmpeg remux/transcode → tsp (PMT + spliceinject) → UDP local feed
 egress: UDP local feed → SRT (ffmpeg libsrt) or HLS (deferred).
 
+Loopback feeds are rewritten to multicast (239.255.98.1 by default) so
+multiple local readers each get a full packet copy.
+
 Stdlib only; external tools invoked as subprocesses.
 """
 
@@ -28,6 +31,60 @@ def which(name: str) -> Optional[str]:
         if override:
             return override
     return shutil.which(name)
+
+
+def _is_loopback_host(host: str) -> bool:
+    h = (host or "").strip().lower()
+    return h in ("", "127.0.0.1", "localhost", "::1")
+
+
+def _is_multicast_host(host: str) -> bool:
+    try:
+        first = int((host or "").strip().split(".", 1)[0])
+    except ValueError:
+        return False
+    return 224 <= first <= 239
+
+
+def resolve_local_feed_host(host: Optional[str] = None) -> str:
+    """
+    Resolve the UDP host used for the processed local feed.
+
+    Loopback unicast (127.0.0.1) is rewritten to an admin-scoped multicast
+    group so every local reader (preview, egress, cc-watch, caption-worker)
+    receives a full copy. On Linux, SO_REUSEADDR on unicast UDP typically
+    delivers each datagram to only one socket — which left MediaMTX with
+    "no stream on path nbN" while egress still looked busy.
+
+    Override: NEXBREAK_FEED_MULTICAST=0 keeps the configured host as-is.
+    Group:    NEXBREAK_FEED_MCAST_GROUP (default 239.255.98.1); ports stay
+              per-channel (19001, 19002, …).
+    """
+    raw = (host if host is not None else "127.0.0.1") or "127.0.0.1"
+    raw = str(raw).strip() or "127.0.0.1"
+    flag = (os.environ.get("NEXBREAK_FEED_MULTICAST") or "1").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return raw
+    if _is_multicast_host(raw):
+        return raw
+    if _is_loopback_host(raw):
+        return (os.environ.get("NEXBREAK_FEED_MCAST_GROUP") or "239.255.98.1").strip()
+    return raw
+
+
+def udp_mpegts_input_url(
+    host: str,
+    port: int,
+    *,
+    fifo_size: int = 1000000,
+) -> str:
+    """ffmpeg UDP MPEG-TS input URL (multicast-aware)."""
+    h = resolve_local_feed_host(host)
+    q = f"reuse=1&fifo_size={int(fifo_size)}&overrun_nonfatal=1"
+    if _is_multicast_host(h):
+        # Join via loopback so local tsp → mcast → local readers stays on-box.
+        q = f"localaddr=127.0.0.1&{q}"
+    return f"udp://{h}:{int(port)}?{q}"
 
 
 def require_bins(*names: str) -> dict[str, str]:
@@ -217,22 +274,24 @@ def ffmpeg_preview_argv(
     """
     base = (mediamtx_rtsp or os.environ.get("NEXBREAK_MEDIAMTX_RTSP") or "rtsp://127.0.0.1:8554").rstrip("/")
     dst = f"{base}/{preview_path}"
-    src = f"udp://{feed_host}:{int(feed_port)}?reuse=1&fifo_size=1000000&overrun_nonfatal=1"
+    src = udp_mpegts_input_url(feed_host, feed_port, fifo_size=1000000)
     # Optional scale for CPU — default 1280 wide keeps 16:9 without full UHD encode cost.
     scale = (os.environ.get("NEXBREAK_PREVIEW_SCALE") or "1280:-2").strip()
     vbitrate = (os.environ.get("NEXBREAK_PREVIEW_VBITRATE") or "1500k").strip()
+    # Allow buffering to the next IDR (nobuffer + mid-GOP join left publishers
+    # stuck forever with "non-existing PPS" and never opening the RTSP output).
     return [
         ffmpeg,
         "-hide_banner",
         "-loglevel", "error",
         "-nostdin",
-        "-fflags", "+genpts+discardcorrupt+nobuffer",
+        "-fflags", "+genpts+discardcorrupt",
         "-flags", "low_delay",
-        "-analyzeduration", "5000000",
-        "-probesize", "3000000",
+        "-analyzeduration", "10000000",
+        "-probesize", "5000000",
         "-f", "mpegts",
         "-i", src,
-        "-map", "0:v:0?",
+        "-map", "0:v:0",
         "-map", "0:a:0?",
         "-vf", f"scale={scale}",
         "-c:v", "libx264",
@@ -271,7 +330,8 @@ def tsp_splice_argv(
     (works for live remux without hardcoding a video PID).
     """
     scte_pid = int(channel.get("scte35_pid") or 500)
-    return [
+    out_host = resolve_local_feed_host(feed_host)
+    argv = [
         tsp,
         "--add-input-stuffing", "1/10",
         "-I", "file", "-",
@@ -285,9 +345,12 @@ def tsp_splice_argv(
         "--inject-count", "2",
         "--inject-interval", "800",
         "-P", "filter", "--negate", "--pid", "0x1FFF",
-        "-O", "ip", f"{feed_host}:{feed_port}",
-        "--local-address", "127.0.0.1",
+        "-O", "ip", f"{out_host}:{int(feed_port)}",
     ]
+    # Bind send to loopback for mcast/local feeds so packets stay on-box.
+    if _is_multicast_host(out_host) or _is_loopback_host(feed_host or ""):
+        argv += ["--local-address", "127.0.0.1"]
+    return argv
 
 
 def build_srt_output_url(channel: dict[str, Any]) -> str:
@@ -317,7 +380,7 @@ def ffmpeg_egress_argv(
     if egress["output_type"] != "srt":
         raise ValueError(f"egress output_type={egress['output_type']} not implemented yet (v1 = srt)")
 
-    src = f"udp://{feed_host}:{int(feed_port)}?reuse=1&fifo_size=1000000&overrun_nonfatal=1"
+    src = udp_mpegts_input_url(feed_host, feed_port, fifo_size=1000000)
     dst = build_srt_output_url(egress)
     # Force MPEG-TS demux so ffmpeg does not try to decode (avoids PPS spam on mid-GOP join).
     return [

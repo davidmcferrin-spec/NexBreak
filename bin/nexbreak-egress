@@ -20,7 +20,11 @@ from typing import Any, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nexbreak_db import audit, connect, get_egress_by_service, row_to_dict  # noqa: E402
-from nexbreak_pipeline import ffmpeg_egress_argv, require_bins  # noqa: E402
+from nexbreak_pipeline import (  # noqa: E402
+    ffmpeg_egress_argv,
+    require_bins,
+    resolve_local_feed_host,
+)
 
 log = logging.getLogger("nexbreak-egress")
 _stop = False
@@ -93,12 +97,15 @@ def main() -> int:
 
         feed_host = source["local_feed_host"] or "127.0.0.1"
         feed_port = int(source["local_feed_port"])
+        feed_dest = resolve_local_feed_host(feed_host)
         log.info(
-            "plan: %s type=%s ← %s (%s:%s) srt_mode=%s",
+            "plan: %s type=%s ← %s (%s:%s → %s:%s) srt_mode=%s",
             channel["name"],
             channel["output_type"],
             source["name"],
             feed_host,
+            feed_port,
+            feed_dest,
             feed_port,
             channel.get("srt_mode"),
         )

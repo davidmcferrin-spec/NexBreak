@@ -21,6 +21,10 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from nexbreak_pipeline import udp_mpegts_input_url  # noqa: E402
+
 log = logging.getLogger("nexbreak-cc-watch")
 _stop = False
 
@@ -77,8 +81,8 @@ def main() -> int:
         return 0
 
     ffmpeg = shutil.which("ffmpeg") or os.environ.get("NEXBREAK_FFMPEG", "ffmpeg")
-    # Share the local UDP feed with preview via SO_REUSEADDR, remux to pipe for ccextractor.
-    src = f"udp://{args.feed_host}:{int(args.feed_port)}?reuse=1&fifo_size=500000&overrun_nonfatal=1"
+    # Local feed is multicast when host is loopback so every reader gets a full copy.
+    src = udp_mpegts_input_url(args.feed_host, int(args.feed_port), fifo_size=500000)
     ff_argv = [
         ffmpeg,
         "-hide_banner",

@@ -51,6 +51,7 @@ from nexbreak_pipeline import (  # noqa: E402
     ffmpeg_preview_argv,
     hex_to_bytes,
     require_bins,
+    resolve_local_feed_host,
     scte35_xml,
     tsp_splice_argv,
 )
@@ -63,6 +64,8 @@ _splice_udp = 0
 _procs: list[Popen] = []  # core: ffmpeg [, inject], tsp
 _preview: Optional[Popen] = None
 _preview_argv: list[str] = []
+_preview_path = ""
+_preview_started_at = 0.0
 _preview_restart_at = 0.0
 _cc_watch: Optional[Popen] = None
 _cc_watch_argv: list[str] = []
@@ -99,6 +102,7 @@ def _refresh_effective_mode() -> str:
 def _stop_media(*, stop_captions: bool = False) -> None:
     """Stop ffmpeg/inject/tsp + preview/cc-watch. Optionally stop ASR worker."""
     global _preview, _cc_watch, _captions, _preview_argv, _cc_watch_argv
+    global _preview_path, _preview_started_at
     if stop_captions and _captions is not None:
         _captions.shutdown()
         _captions = None
@@ -123,6 +127,8 @@ def _stop_media(*, stop_captions: bool = False) -> None:
     _procs.clear()
     _preview = None
     _preview_argv = []
+    _preview_path = ""
+    _preview_started_at = 0.0
     _cc_watch = None
     _cc_watch_argv = []
 
@@ -147,12 +153,31 @@ def _start_captions(channel: dict[str, Any]) -> None:
         )
 
 
+def _mediamtx_path_ready(name: str) -> bool:
+    """True when MediaMTX has a ready publisher on path `name`."""
+    if not name:
+        return False
+    base = (os.environ.get("NEXBREAK_MEDIAMTX_API") or "http://127.0.0.1:9997").rstrip("/")
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(f"{base}/v3/paths/list", timeout=1.0) as resp:
+            data = json.loads(resp.read().decode())
+        for item in data.get("items") or []:
+            if item.get("name") == name and item.get("ready"):
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _start_preview(channel: dict[str, Any], ffmpeg: str) -> None:
-    global _preview, _preview_argv
+    global _preview, _preview_argv, _preview_path, _preview_started_at
     if not int(channel.get("preview_enabled") if channel.get("preview_enabled") is not None else 1):
         log.info("preview disabled for this channel")
         return
     path = preview_path_for(channel)
+    _preview_path = path
     _preview_argv = ffmpeg_preview_argv(
         ffmpeg=ffmpeg,
         feed_host=channel["local_feed_host"] or "127.0.0.1",
@@ -163,21 +188,41 @@ def _start_preview(channel: dict[str, Any], ffmpeg: str) -> None:
     # Wait for local feed to carry PAT/PMT + a keyframe before attaching.
     time.sleep(2.5)
     _preview = Popen(_preview_argv)
+    _preview_started_at = time.time()
 
 
 def _ensure_preview() -> None:
-    global _preview, _preview_restart_at
+    global _preview, _preview_restart_at, _preview_started_at
     if not _preview_argv:
         return
-    if _preview is not None and _preview.poll() is None:
-        return
     now = time.time()
+    if _preview is not None and _preview.poll() is None:
+        # Process can sit forever mid-GOP / starved without ever publishing.
+        if _mediamtx_path_ready(_preview_path):
+            return
+        if now - _preview_started_at < 25.0:
+            return
+        log.warning(
+            "preview alive but MediaMTX path %s not ready — recycling publisher",
+            _preview_path or "?",
+        )
+        try:
+            _preview.terminate()
+            _preview.wait(timeout=2.0)
+        except Exception:
+            try:
+                _preview.kill()
+            except Exception:
+                pass
+        _preview = None
+        _preview_restart_at = 0.0
     if now < _preview_restart_at:
         return
     _preview_restart_at = now + 3.0
     code = _preview.returncode if _preview is not None else "n/a"
     log.warning("preview publisher down (code=%s) — restarting", code)
     _preview = Popen(_preview_argv)
+    _preview_started_at = time.time()
 
 
 def _start_cc_watch(channel: dict[str, Any]) -> None:
@@ -227,6 +272,7 @@ def _start_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
     bins = require_bins("ffmpeg", "tsp")
     feed_host = channel["local_feed_host"] or "127.0.0.1"
     feed_port = int(channel["local_feed_port"])
+    feed_dest = resolve_local_feed_host(feed_host)
 
     _source_has_cc = probe_source_has_cc(channel)
     _next_probe_at = time.time() + 30.0
@@ -237,6 +283,15 @@ def _start_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
         _source_has_cc,
         mode,
     )
+    if feed_dest != feed_host:
+        log.info(
+            "local feed fan-out: %s:%s → multicast %s:%s "
+            "(preview/egress/cc-watch each get a full copy)",
+            feed_host,
+            feed_port,
+            feed_dest,
+            feed_port,
+        )
 
     ff_argv = ffmpeg_ingest_argv(channel, bins["ffmpeg"])
     tsp_argv = tsp_splice_argv(

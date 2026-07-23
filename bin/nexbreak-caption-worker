@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nexbreak_caption_policy import cue_sock_path  # noqa: E402
 from nexbreak_db import connect, migrate  # noqa: E402
+from nexbreak_pipeline import udp_mpegts_input_url  # noqa: E402
 
 log = logging.getLogger("nexbreak-caption-worker")
 _stop = False
@@ -124,7 +125,7 @@ def send_cue(sock: Optional[socket.socket], *, text: str, clear: bool, seq: int)
 
 
 def audio_tap_argv(ffmpeg: str, host: str, port: int) -> list[str]:
-    src = f"udp://{host}:{int(port)}?reuse=1&fifo_size=500000&overrun_nonfatal=1"
+    src = udp_mpegts_input_url(host, int(port), fifo_size=500000)
     return [
         ffmpeg,
         "-hide_banner",
