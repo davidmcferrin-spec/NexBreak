@@ -439,6 +439,13 @@
     if (state.dropped) {
       bits.push(chainBadge("warn", "dropped " + String(state.dropped)));
     }
+    if (state.rejected) {
+      var rej = "command errors " + String(state.rejected);
+      if (state.last_rejected_line) {
+        rej += " — " + String(state.last_rejected_line).slice(0, 120);
+      }
+      bits.push(chainBadge("warn", rej));
+    }
     var evt = state.last_event;
     if (evt) {
       var desc =
@@ -454,11 +461,12 @@
           "</span>"
       );
     }
-    // Diagnosis hint: commands received but nothing ever injected.
+    // Diagnosis hint: commands received (and not rejected) but never injected.
     if (
       state.engine !== "live" &&
       Number(state.udp_received || 0) > 0 &&
-      Number(state.injected || 0) === 0
+      Number(state.injected || 0) === 0 &&
+      !Number(state.rejected || 0)
     ) {
       bits.push(
         chainBadge(

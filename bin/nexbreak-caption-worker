@@ -630,11 +630,8 @@ def main() -> int:
             seq=seq,
             audio_tap_alive=False,
         )
-        if cc_udp_sock is not None:
-            try:
-                cc_udp_sock.close()
-            except OSError:
-                pass
+        # (direct --cc-udp path removed — cue→cc-inject bridge owns inject;
+        #  no UDP socket to close here)
         log.info("caption worker exit (vosk unloaded)")
     return 0
 

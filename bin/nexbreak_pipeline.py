@@ -641,6 +641,16 @@ def egress_engine() -> str:
     return "ffmpeg" if raw == "ffmpeg" else "tsp"
 
 
+# SCTE-35 unique_program_id for generated splice_insert commands. Required by
+# the TSDuck XML model (its absence made spliceinject reject every command).
+# We run SPTS channels, so a constant per-box default is fine for v1.
+def scte35_unique_program_id() -> int:
+    try:
+        return int(os.environ.get("NEXBREAK_UNIQUE_PROGRAM_ID", "1"))
+    except ValueError:
+        return 1
+
+
 def scte35_xml(
     *,
     splice_type: str,
@@ -648,20 +658,35 @@ def scte35_xml(
     hex_payload: Optional[str] = None,
     auto_return: bool = False,
     break_duration_sec: Optional[float] = None,
+    unique_program_id: Optional[int] = None,
 ) -> Optional[str]:
     """
     Build a TSDuck XML splice_information_table, or None if hex_payload should
     be sent as raw binary instead.
 
+    Only valid for immediate inserts and cancels. TSDuck's XML model REQUIRES
+    pts_time when splice_immediate is false, and cannot express a program
+    splice with time_specified_flag=0 ("earliest opportunity") — use
+    scte35_splice_insert_section() (binary) for *_normal types.
+
     Maps NexBreak splice_type → SCTE-35 splice_insert:
       *_immediate → splice_immediate=true
-      *_normal    → splice_immediate=false
       auto_return → optional break_duration (90 kHz ticks) on start events
     """
     if hex_payload:
         return None
 
     st = (splice_type or "").strip()
+    if st.endswith("_normal"):
+        raise ValueError(
+            f"{st}: non-immediate splice without pts_time cannot be expressed "
+            "in TSDuck XML — use scte35_splice_insert_section()"
+        )
+    upid = (
+        int(unique_program_id)
+        if unique_program_id is not None
+        else scte35_unique_program_id()
+    )
     if st == "splice_cancel":
         body = (
             f'<splice_insert splice_event_id="{event_id}" '
@@ -669,7 +694,6 @@ def scte35_xml(
         )
     else:
         out_of_network = "true" if st.startswith("splice_start") else "false"
-        splice_immediate = "true" if st.endswith("_immediate") else "false"
         # Auto-return only meaningful on out-of-network (start) inserts.
         break_xml = ""
         if (
@@ -682,20 +706,16 @@ def scte35_xml(
             break_xml = (
                 f'<break_duration auto_return="true" duration="{ticks}"/>'
             )
+        attrs = (
+            f'splice_event_id="{event_id}" '
+            f'out_of_network="{out_of_network}" '
+            f'splice_immediate="true" '
+            f'unique_program_id="{upid}"'
+        )
         if break_xml:
-            body = (
-                f'<splice_insert splice_event_id="{event_id}" '
-                f'out_of_network="{out_of_network}" '
-                f'splice_immediate="{splice_immediate}">'
-                f"{break_xml}"
-                f"</splice_insert>"
-            )
+            body = f"<splice_insert {attrs}>{break_xml}</splice_insert>"
         else:
-            body = (
-                f'<splice_insert splice_event_id="{event_id}" '
-                f'out_of_network="{out_of_network}" '
-                f'splice_immediate="{splice_immediate}"/>'
-            )
+            body = f"<splice_insert {attrs}/>"
 
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -705,6 +725,138 @@ def scte35_xml(
         "  </splice_information_table>\n"
         "</tsduck>\n"
     )
+
+
+def mpeg_crc32(data: bytes) -> int:
+    """CRC-32/MPEG-2 (poly 0x04C11DB7, init 0xFFFFFFFF, no reflection/xorout)."""
+    crc = 0xFFFFFFFF
+    for byte in data:
+        crc ^= byte << 24
+        for _ in range(8):
+            if crc & 0x80000000:
+                crc = ((crc << 1) ^ 0x04C11DB7) & 0xFFFFFFFF
+            else:
+                crc = (crc << 1) & 0xFFFFFFFF
+    return crc
+
+
+def scte35_splice_insert_section(
+    *,
+    event_id: int,
+    out_of_network: bool,
+    immediate: bool = False,
+    auto_return: bool = False,
+    break_duration_sec: Optional[float] = None,
+    unique_program_id: Optional[int] = None,
+) -> bytes:
+    """
+    Build a complete binary SCTE-35 splice_info_section (TID 0xFC) carrying a
+    program-level splice_insert. spliceinject accepts raw sections on its UDP
+    socket (first byte 0xFC → binary).
+
+    Used for *_normal (non-immediate) commands: program_splice_flag=1,
+    splice_immediate_flag=0, splice_time() with time_specified_flag=0 —
+    "splice at the earliest opportunity", which downstream encoders align to
+    the next GOP/keyframe. TSDuck's XML model cannot express this form.
+    """
+    upid = (
+        int(unique_program_id)
+        if unique_program_id is not None
+        else scte35_unique_program_id()
+    )
+    duration_ticks: Optional[int] = None
+    if (
+        auto_return
+        and out_of_network
+        and break_duration_sec is not None
+        and float(break_duration_sec) > 0
+    ):
+        duration_ticks = int(round(float(break_duration_sec) * 90000.0)) & ((1 << 33) - 1)
+
+    # splice_insert() command body.
+    cmd = bytearray()
+    cmd += int(event_id).to_bytes(4, "big")            # splice_event_id
+    cmd.append(0x7F)                                   # cancel=0 + reserved(7)
+    flags = 0x0F                                       # reserved(4)
+    if out_of_network:
+        flags |= 0x80                                  # out_of_network_indicator
+    flags |= 0x40                                      # program_splice_flag=1
+    if duration_ticks is not None:
+        flags |= 0x20                                  # duration_flag
+    if immediate:
+        flags |= 0x10                                  # splice_immediate_flag
+    cmd.append(flags)
+    if not immediate:
+        # splice_time(): time_specified_flag=0 + reserved(7)
+        cmd.append(0x7F)
+    if duration_ticks is not None:
+        # break_duration(): auto_return(1) + reserved(6) + duration(33)
+        b0 = 0x7E | ((duration_ticks >> 32) & 0x01)    # reserved '111111'
+        b0 |= 0x80                                     # auto_return=1
+        cmd.append(b0)
+        cmd += (duration_ticks & 0xFFFFFFFF).to_bytes(4, "big")
+    cmd += int(upid).to_bytes(2, "big")                # unique_program_id
+    cmd.append(0)                                      # avail_num
+    cmd.append(0)                                      # avails_expected
+
+    # splice_info_section around it.
+    body = bytearray()
+    body.append(0x00)                                  # protocol_version
+    body.append(0x00)                                  # encrypted(1)+alg(6)+pts_adj bit32
+    body += (0).to_bytes(4, "big")                     # pts_adjustment low 32
+    body.append(0x00)                                  # cw_index
+    body.append(0xFF)                                  # tier(12)=0xFFF …
+    body.append(0xF0 | ((len(cmd) >> 8) & 0x0F))       # … + command_length(12)
+    body.append(len(cmd) & 0xFF)
+    body.append(0x05)                                  # splice_command_type=splice_insert
+    body += cmd
+    body += (0).to_bytes(2, "big")                     # descriptor_loop_length=0
+
+    section_length = len(body) + 4                     # + CRC32
+    header = bytearray()
+    header.append(0xFC)                                # table_id
+    header.append(0x30 | ((section_length >> 8) & 0x0F))  # ssi=0 priv=0 sap='11'
+    header.append(section_length & 0xFF)
+    section = bytes(header) + bytes(body)
+    return section + mpeg_crc32(section).to_bytes(4, "big")
+
+
+def scte35_command_payload(
+    *,
+    splice_type: str,
+    event_id: int,
+    hex_payload: Optional[str] = None,
+    auto_return: bool = False,
+    break_duration_sec: Optional[float] = None,
+) -> tuple[str, bytes]:
+    """
+    Build the UDP datagram for tsp spliceinject. Returns (kind, payload):
+      hex — operator-supplied raw section bytes
+      bin — binary splice_insert for *_normal (non-immediate, no pts_time)
+      xml — TSDuck XML for *_immediate and splice_cancel
+    """
+    if hex_payload:
+        return ("hex", hex_to_bytes(hex_payload))
+    st = (splice_type or "").strip()
+    if st.endswith("_normal"):
+        return (
+            "bin",
+            scte35_splice_insert_section(
+                event_id=int(event_id),
+                out_of_network=st.startswith("splice_start"),
+                immediate=False,
+                auto_return=bool(auto_return),
+                break_duration_sec=break_duration_sec,
+            ),
+        )
+    xml = scte35_xml(
+        splice_type=st,
+        event_id=int(event_id),
+        auto_return=bool(auto_return),
+        break_duration_sec=break_duration_sec,
+    )
+    assert xml is not None
+    return ("xml", xml.encode("utf-8"))
 
 
 def hex_to_bytes(hex_payload: str) -> bytes:

@@ -187,6 +187,18 @@ Done:
  the service video/PCR PID, and only null packets are replaced (hence
  `--add-input-stuffing 1/8`). Env gates: `NEXBREAK_TSP_VERBOSE=0`,
  `NEXBREAK_SPLICEMON=0`.
+- SCTE payload fix (2026-07-23): TSDuck's XML model REQUIRES
+ `unique_program_id` on non-cancel `<splice_insert>` (its absence made
+ spliceinject reject every command) and REQUIRES `pts_time` when
+ `splice_immediate="false"` — XML cannot express "program splice at
+ earliest opportunity". So: `scte35_xml()` (immediate/cancel only) now sets
+ `unique_program_id` (`NEXBREAK_UNIQUE_PROGRAM_ID`, default 1);
+ `splice_start_normal`/`splice_end_normal` are built as binary
+ splice_info_sections (`scte35_splice_insert_section()`,
+ time_specified_flag=0, MPEG CRC32) — spliceinject takes raw sections on
+ the same UDP socket (first byte 0xFC). `scte35_command_payload()` routes
+ hex/bin/xml; proc counts spliceinject command errors as `rejected` in the
+ splice-monitor state and the Verify panel shows the last reject line.
 - `web/` UI: Dashboard, Roll (with live preview + CC overlay + policy cycle), Preview,
   Channels (processing + egress editors; Copy URL for SRT listener / HLS M3U8), Router, Captions, Verify, Services
   (systemd/journal via allowlisted sudo wrappers — no controller), Metrics (host

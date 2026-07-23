@@ -55,12 +55,11 @@ from nexbreak_pipeline import (  # noqa: E402
     SPLICEMON_MARKER,
     ffmpeg_ingest_argv,
     ffmpeg_preview_argv,
-    hex_to_bytes,
     output_bitrate_kbps,
     probe_mpegts_bitrate_kbps,
     require_bins,
     resolve_local_feed_host,
-    scte35_xml,
+    scte35_command_payload,
     tsp_splice_argv,
     write_bitrate_state,
     write_splicemon_state,
@@ -117,6 +116,9 @@ def _splicemon_reset() -> None:
             "dropped": 0,
             "last_dropped_at": None,
             "last_dropped_line": None,
+            "rejected": 0,
+            "last_rejected_at": None,
+            "last_rejected_line": None,
             "events_total": 0,
             "counts": {},
             "last_event": None,
@@ -232,7 +234,15 @@ def _tsp_log_reader(stream: Any) -> None:
                     _splicemon_bump(
                         "dropped", "last_dropped_at", last_dropped_line=line[:240]
                     )
-                log.info("tsp: %s", line)
+                elif "error" in low:
+                    # Command parse/validation rejects (bad XML, bad section…)
+                    _splicemon_bump(
+                        "rejected", "last_rejected_at", last_rejected_line=line[:240]
+                    )
+                if "error" in low:
+                    log.error("tsp: %s", line)
+                else:
+                    log.info("tsp: %s", line)
                 continue
             low = line.lower()
             if "error" in low:
@@ -726,27 +736,21 @@ def _apply_splice(
         if _stop:
             return {"ok": False, "error": "aborted"}
 
-    xml = scte35_xml(
+    kind, payload = scte35_command_payload(
         splice_type=splice_type,
         event_id=eid,
         hex_payload=hex_payload,
         auto_return=bool(auto_return),
         break_duration_sec=break_duration_sec,
     )
-    if xml is None:
-        assert hex_payload is not None
-        raw = hex_to_bytes(hex_payload)
-        sends = _send_splice_payload(raw)
-        detail = (
-            f"hex payload {len(raw)} bytes event_id={eid} "
-            f"→ udp/{_splice_udp} x{sends}"
-        )
-    else:
-        sends = _send_splice_payload(xml.encode("utf-8"))
-        extra = ""
-        if auto_return and break_duration_sec:
-            extra = f" auto_return={break_duration_sec}s"
-        detail = f"xml event_id={eid}{extra} → udp/{_splice_udp} x{sends}"
+    sends = _send_splice_payload(payload)
+    extra = ""
+    if auto_return and break_duration_sec:
+        extra = f" auto_return={break_duration_sec}s"
+    detail = (
+        f"{kind} {len(payload)} bytes event_id={eid}{extra} "
+        f"→ udp/{_splice_udp} x{sends}"
+    )
 
     log.info("injected %s (%s)", splice_type, detail)
     return {"ok": True, "event_id": eid, "detail": detail, "delay_ms": delay_ms}
