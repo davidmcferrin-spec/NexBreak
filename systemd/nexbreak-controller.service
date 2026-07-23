@@ -10,6 +10,11 @@ Restart=always
 RestartSec=2
 User=nexbreak
 Group=nexbreak
+# Same runtime dir as proc@ — required under ProtectSystem=strict so Verify
+# can create /run/nexbreak/scte (ReadWritePaths alone is not enough if the
+# path is not a systemd RuntimeDirectory for this unit).
+RuntimeDirectory=nexbreak
+RuntimeDirectoryMode=0770
 Environment=NEXBREAK_RUN_DIR=/run/nexbreak
 # Connect to /run/nexbreak/proc-*.sock (created by nexbreak-proc@ instances)
 ReadWritePaths=/var/lib/nexbreak /var/log/nexbreak /run/nexbreak

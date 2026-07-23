@@ -17,28 +17,36 @@ def run_dir() -> Path:
     return Path(os.environ.get("NEXBREAK_RUN_DIR", "/run/nexbreak"))
 
 
-def scte_dir() -> Path:
-    d = run_dir() / "scte"
+def ensure_run_subdir(name: str) -> Path:
+    """Create /run/nexbreak/<name> when writable; raise OSError if not."""
+    d = run_dir() / name
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def asr_dir() -> Path:
-    d = run_dir() / "asr"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+def scte_dir(*, create: bool = False) -> Path:
+    """SCTE verify state dir. Do not mkdir on read paths (ProtectSystem EROFS)."""
+    if create:
+        return ensure_run_subdir("scte")
+    return run_dir() / "scte"
+
+
+def asr_dir(*, create: bool = False) -> Path:
+    if create:
+        return ensure_run_subdir("asr")
+    return run_dir() / "asr"
 
 
 def scte_state_path(egress_id: int) -> Path:
-    return scte_dir() / f"egress-{int(egress_id)}.json"
+    return run_dir() / "scte" / f"egress-{int(egress_id)}.json"
 
 
 def scte_pid_path(egress_id: int) -> Path:
-    return scte_dir() / f"egress-{int(egress_id)}.pid"
+    return run_dir() / "scte" / f"egress-{int(egress_id)}.pid"
 
 
 def asr_state_path(service_name: str) -> Path:
-    return asr_dir() / f"{service_name}.json"
+    return run_dir() / "asr" / f"{service_name}.json"
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -163,7 +171,11 @@ def stop_watch_pid(egress_id: int, *, timeout: float = 5.0) -> bool:
     state["listening"] = False
     state["locked"] = False
     state["updated_at"] = time.time()
-    atomic_write_json(scte_state_path(egress_id), state)
+    try:
+        atomic_write_json(scte_state_path(egress_id), state)
+    except OSError:
+        # EROFS under ProtectSystem if RuntimeDirectory missing — pid stop still ok.
+        pass
     return True
 
 
