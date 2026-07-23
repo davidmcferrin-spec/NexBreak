@@ -99,9 +99,15 @@ curl -X POST http://127.0.0.1:8787/v1/processing/1/captioning \
 # Legacy: {"enabled":0|1} maps to off|auto
 ```
 
-Optional model path: `NEXBREAK_VOSK_MODEL=/path/to/vosk-model` on the proc
-unit. Without it the worker idles (clears cues) so policy/inject can still be
-validated. Install `ccextractor` for Preview overlay + richer probes.
+Install ASR (model + `vosk` pip + systemd drop-in):
+
+```bash
+sudo bash scripts/install-ubuntu.sh vosk
+```
+
+That sets `NEXBREAK_VOSK_MODEL` on `nexbreak-proc@*`. Without it the worker
+idles (clears cues) so policy/inject can still be validated. Then set caption
+policy to **Force ASR** (UI or API). Install `ccextractor` for Preview overlay.
 
 ## Ubuntu bring-up
 

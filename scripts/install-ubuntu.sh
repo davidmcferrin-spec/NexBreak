@@ -15,10 +15,13 @@ Usage: sudo $0 <command>
   install       Copy tree to $PREFIX, create user/dirs, install units
   init-db       Create SQLite schema + seed 4 demo channels
   enable        Enable controller + proc@1 + egress@1
+  vosk          Download Vosk model + pip package; wire NEXBREAK_VOSK_MODEL
   status        systemctl status snapshot
 
 Env overrides: NEXBREAK_PREFIX NEXBREAK_DATA NEXBREAK_LOG
                NEXBREAK_TIMEZONE (default America/New_York)
+               NEXBREAK_VOSK_MODEL_DIR  (default /opt/vosk)
+               NEXBREAK_VOSK_MODEL_NAME (default vosk-model-small-en-us-0.15)
 EOF
 }
 
@@ -177,6 +180,102 @@ cmd_status() {
   curl -sS http://127.0.0.1:9997/v3/paths/list || echo "mediamtx API not reachable"
 }
 
+cmd_vosk() {
+  # Optional ASR stack for caption_policy force_asr / auto→insert.
+  # Does not change channel policy — set Force ASR in UI (or API) after this.
+  local model_root="${NEXBREAK_VOSK_MODEL_DIR:-/opt/vosk}"
+  local model_name="${NEXBREAK_VOSK_MODEL_NAME:-vosk-model-small-en-us-0.15}"
+  local model_path="${model_root}/${model_name}"
+  local zip_url="${NEXBREAK_VOSK_MODEL_URL:-https://alphacephei.com/vosk/models/${model_name}.zip}"
+  local drop_in_dir="/etc/systemd/system/nexbreak-proc@.service.d"
+  local drop_in="${drop_in_dir}/vosk.conf"
+
+  apt-get update
+  apt-get install -y python3-pip python3-venv unzip curl
+
+  mkdir -p "$model_root"
+  if [[ -d "$model_path" && -f "$model_path/am/final.mdl" ]]; then
+    echo "Vosk model already present: $model_path"
+  else
+    local tmp_zip="/tmp/${model_name}.zip"
+    echo "Downloading Vosk model ${model_name}…"
+    curl -fsSL -o "$tmp_zip" "$zip_url"
+    echo "Extracting to ${model_root}…"
+    rm -rf "${model_path}.partial"
+    mkdir -p "${model_path}.partial"
+    unzip -q "$tmp_zip" -d "${model_path}.partial"
+    # Zip usually contains a top-level folder named like the model.
+    if [[ -d "${model_path}.partial/${model_name}" ]]; then
+      rm -rf "$model_path"
+      mv "${model_path}.partial/${model_name}" "$model_path"
+      rm -rf "${model_path}.partial"
+    else
+      # Flat or differently named — promote the only child dir if present.
+      local kids=("${model_path}.partial"/*)
+      if [[ ${#kids[@]} -eq 1 && -d "${kids[0]}" ]]; then
+        rm -rf "$model_path"
+        mv "${kids[0]}" "$model_path"
+        rm -rf "${model_path}.partial"
+      else
+        rm -rf "$model_path"
+        mv "${model_path}.partial" "$model_path"
+      fi
+    fi
+    rm -f "$tmp_zip"
+    echo "Installed model: $model_path"
+  fi
+
+  if [[ ! -d "$model_path" ]]; then
+    echo "ERROR: model path missing after install: $model_path" >&2
+    exit 1
+  fi
+
+  echo "Installing Python vosk package (system site)…"
+  # Ubuntu 24+ marks system Python as externally managed; captions are an
+  # optional host tool, so --break-system-packages is intentional here.
+  python3 -m pip install --upgrade --break-system-packages 'vosk>=0.3.45'
+
+  mkdir -p "$drop_in_dir"
+  cat >"$drop_in" <<EOF
+# Managed by scripts/install-ubuntu.sh vosk — do not hand-edit; re-run vosk to refresh.
+[Service]
+Environment=NEXBREAK_VOSK_MODEL=${model_path}
+EOF
+  chmod 644 "$drop_in"
+  systemctl daemon-reload
+
+  # Restart any active proc instances so they pick up the env + can go asr_insert.
+  local restarted=0
+  local unit
+  for unit in $(systemctl list-units --type=service --state=running --no-legend 'nexbreak-proc@*' 2>/dev/null | awk '{print $1}'); do
+    echo "Restarting ${unit}…"
+    systemctl restart "$unit"
+    restarted=1
+  done
+  if [[ "$restarted" -eq 0 ]]; then
+    echo "No running nexbreak-proc@* units — start one after setting caption policy."
+  fi
+
+  echo
+  echo "Vosk ready:"
+  echo "  model:  $model_path"
+  echo "  env:    NEXBREAK_VOSK_MODEL (via $drop_in)"
+  python3 - <<'PY' || true
+import os, sys
+try:
+    import vosk
+    print("  package:", getattr(vosk, "__file__", "vosk"))
+except ImportError as e:
+    print("  ERROR: vosk import failed:", e, file=sys.stderr)
+    sys.exit(1)
+PY
+  echo
+  echo "Next: set channel policy to Force ASR (Captions/Channels UI) or:"
+  echo "  curl -X POST http://127.0.0.1:8787/v1/processing/1/captioning \\"
+  echo "    -H 'Content-Type: application/json' -d '{\"policy\":\"force_asr\"}'"
+  echo "Then confirm: journalctl -u nexbreak-proc@1 -n 40 | grep -iE 'effective|vosk|asr'"
+}
+
 main() {
   local cmd="${1:-}"
   case "$cmd" in
@@ -184,6 +283,7 @@ main() {
     install) cmd_install ;;
     init-db) cmd_init_db ;;
     enable) cmd_enable ;;
+    vosk) cmd_vosk ;;
     status) cmd_status ;;
     *) usage; exit 1 ;;
   esac
