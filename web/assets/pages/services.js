@@ -281,4 +281,58 @@
   }, 2500);
   vacuumBtn.disabled = true;
   refreshServices();
+
+  var bundleBtn = document.getElementById("btn-support-bundle");
+  var bundleHours = document.getElementById("bundle-hours");
+  if (bundleBtn && bundleHours) {
+    bundleBtn.addEventListener("click", async function () {
+      var hours = parseInt(bundleHours.value, 10) || 24;
+      if (
+        !confirm(
+          "Build a redacted support bundle for the last " +
+            hours +
+            " hour(s)?\n\n" +
+            "Includes journals, channel config, routing, audit, and runtime state.\n" +
+            "Secrets (API keys, URL passwords) are stripped."
+        )
+      ) {
+        return;
+      }
+      bundleBtn.disabled = true;
+      statusEl.textContent = "Building support bundle (" + hours + "h)…";
+      try {
+        var res = await fetch(
+          "/ops.php?action=support_bundle&hours=" + encodeURIComponent(String(hours)),
+          { method: "GET", cache: "no-store" }
+        );
+        var ct = (res.headers.get("Content-Type") || "").toLowerCase();
+        if (!res.ok || ct.indexOf("application/zip") < 0) {
+          var errBody = await res.json().catch(function () {
+            return {};
+          });
+          throw new Error(errBody.error || "HTTP " + res.status);
+        }
+        var blob = await res.blob();
+        var dispo = res.headers.get("Content-Disposition") || "";
+        var fname = "nexbreak-support.zip";
+        var m = /filename=\"([^\"]+)\"/i.exec(dispo);
+        if (m) fname = m[1];
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = fname;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function () {
+          URL.revokeObjectURL(url);
+        }, 2000);
+        statusEl.textContent = "Support bundle downloaded (" + fname + ")";
+      } catch (err) {
+        statusEl.textContent = "support bundle error: " + err.message;
+      } finally {
+        bundleBtn.disabled = false;
+      }
+    });
+  }
 })();

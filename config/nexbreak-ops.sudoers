@@ -13,3 +13,4 @@ www-data ALL=(root) NOPASSWD: /usr/local/bin/nexbreak-ops-journal.sh *
 www-data ALL=(root) NOPASSWD: /usr/local/bin/nexbreak-ops-journal-clear.sh *
 www-data ALL=(root) NOPASSWD: /usr/local/bin/nexbreak-ops-restart.sh *
 www-data ALL=(root) NOPASSWD: /usr/local/bin/nexbreak-ops-enable.sh *
+www-data ALL=(root) NOPASSWD: /usr/local/bin/nexbreak-ops-support-bundle.sh *

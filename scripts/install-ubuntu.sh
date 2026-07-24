@@ -194,9 +194,16 @@ cmd_install() {
     a2ensite nexbreak || true
   fi
   # Services page: allowlisted sudo wrappers for www-data (NexVUE pattern)
-  for s in nexbreak-ops-status.sh nexbreak-ops-journal.sh nexbreak-ops-journal-clear.sh nexbreak-ops-restart.sh nexbreak-ops-enable.sh; do
+  for s in nexbreak-ops-status.sh nexbreak-ops-journal.sh nexbreak-ops-journal-clear.sh nexbreak-ops-restart.sh nexbreak-ops-enable.sh nexbreak-ops-support-bundle.sh; do
     install -m 755 "$PREFIX/scripts/ops/$s" "/usr/local/bin/$s"
   done
+  # Support bundle collector (invoked by the ops wrapper above).
+  if [[ -f "$PREFIX/bin/nexbreak-support-bundle" ]]; then
+    chmod 755 "$PREFIX/bin/nexbreak-support-bundle"
+    mkdir -p "$DATA/support"
+    chgrp www-data "$DATA/support" 2>/dev/null || true
+    chmod 750 "$DATA/support" 2>/dev/null || true
+  fi
   if [[ -f "$PREFIX"/config/nexbreak-ops.sudoers ]]; then
     install -m 440 "$PREFIX"/config/nexbreak-ops.sudoers /etc/sudoers.d/nexbreak-ops
     if ! visudo -cf /etc/sudoers.d/nexbreak-ops >/dev/null; then

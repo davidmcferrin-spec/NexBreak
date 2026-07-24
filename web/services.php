@@ -10,11 +10,26 @@ require __DIR__ . '/include/header.php';
     <h1>Services</h1>
     <p class="sub">Systemd unit status and journal — LAN-trust ops (not a substitute for SSH)</p>
   </div>
+  <div class="bar support-bundle-bar">
+    <label class="muted" for="bundle-hours">Support bundle</label>
+    <select id="bundle-hours" title="Journal and audit window">
+      <option value="1">Last 1 hour</option>
+      <option value="6">Last 6 hours</option>
+      <option value="12">Last 12 hours</option>
+      <option value="24" selected>Last 24 hours</option>
+      <option value="48">Last 48 hours</option>
+      <option value="72">Last 72 hours</option>
+    </select>
+    <button type="button" class="primary" id="btn-support-bundle" title="Download redacted journals + config + runtime state as a zip">
+      Download zip…
+    </button>
+  </div>
 </div>
 
 <p class="warn-banner">
   Restart / start / stop go through allowlisted sudo wrappers.
   Core units (controller, verify, MediaMTX) can be restarted but not disabled from this page.
+  Support bundle includes journals, channel config, routing, audit, and runtime state — secrets redacted; safe to hand off for bake-in.
 </p>
 
 <div class="ops-layout">

@@ -14,6 +14,7 @@ See `CLAUDE.md` for the full design record.
 - Global **Triggers** preset library (immediate/normal, auto-return, hex)
 - Operator-tunable trigger→insertion delay (pre-roll for GOP-aligned cues)
 - Panel REST documented in [`docs/panel-api.md`](docs/panel-api.md)
+- Support bundle (Services zip) in [`docs/support-bundle.md`](docs/support-bundle.md)
 - Shared caption lexicon + blacklist; caption policy auto/force ASR/off with CEA-608 on SRT
 - Software router between processed feeds and egress adapters
 
@@ -158,6 +159,8 @@ changes need a unit restart.
 **Services** / **Metrics** mirror NexVUE ops: `install` drops allowlisted
 `/usr/local/bin/nexbreak-ops-*.sh` + `/etc/sudoers.d/nexbreak-ops` so the
 Services page can status/journal/restart channel units as `www-data`.
+Services also builds a **support bundle** zip (journals + redacted
+config/state for 1–72h) — see [`docs/support-bundle.md`](docs/support-bundle.md).
 Metrics shows live host resources (CPU, load, memory, disk, uptime, GPU when
 present) plus splice/config/routing activity from `audit_events`.
 

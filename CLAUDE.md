@@ -244,12 +244,18 @@ Done:
   Channels (processing + egress editors; Source dropdown routes input→egress;
   Copy URL for SRT listener / HLS M3U8; former Router page redirects here),
   Captions, Verify, Services (systemd/journal via allowlisted sudo wrappers —
-  no controller), Metrics (host CPU/mem/disk/uptime/GPU + audit-derived
-  splice/config/routing activity), Audit; `/api` PHP proxy to controller/verify
+  no controller; **Support bundle** zip: journals + redacted config/state for
+  1–72h — see `docs/support-bundle.md`), Metrics (host CPU/mem/disk/uptime/GPU +
+  audit-derived splice/config/routing activity), Audit; `/api` PHP proxy to
+  controller/verify
 - Panel API key (2026-07-23): controller mints a 12-char key on boot;
   `/v1/splice` requires it (query `key`, `X-Api-Key`, or Bearer). Triggers
   page reveals/copies/rotates and embeds `&key=` in StreamDeck/DNF URLs;
   Roll sends `X-Api-Key` via `nexbreak-api.js`. See `docs/panel-api.md`.
+- Support bundle (2026-07-24): Services one-click zip via
+  `nexbreak-ops-support-bundle.sh` → `bin/nexbreak-support-bundle` (journals,
+  systemd status, redacted channel/routing/presets/audit, `/run/nexbreak`
+  state, host/versions). Secrets stripped; safe for bake-in hand-off.
 
 Next:
 - Hardware bring-up of channel 1 against a real RTSP source

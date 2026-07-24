@@ -5,7 +5,8 @@
  * Phase 1 LAN-trust: no auth. Privileged work goes through allowlisted sudo
  * wrappers only (see config/nexbreak-ops.sudoers).
  *
- * Actions: services | journal | journal_clear | restart | restart_channels | set_enabled | set_running
+ * Actions: services | journal | journal_clear | restart | restart_channels |
+ *          set_enabled | set_running | support_bundle
  */
 declare(strict_types=1);
 
@@ -139,14 +140,79 @@ function batch_unit_status(array $units): array
     return $items;
 }
 
-header('Content-Type: application/json');
-header('Cache-Control: no-store');
-
 $body = read_json_body();
 $action = $_GET['action'] ?? ($body['action'] ?? '');
 if (!is_string($action) || $action === '') {
     fail(400, 'action required');
 }
+
+// Support bundle is a binary download — handle before JSON headers.
+if ($action === 'support_bundle') {
+    // Journals for 72h can exceed PHP's default 30s.
+    if (function_exists('set_time_limit')) {
+        @set_time_limit(180);
+    }
+    $hours = (int) ($body['hours'] ?? ($_GET['hours'] ?? 24));
+    $allowed = [1, 6, 12, 24, 48, 72];
+    if (!in_array($hours, $allowed, true)) {
+        fail(400, 'hours must be one of: 1, 6, 12, 24, 48, 72');
+    }
+    $ip = $_SERVER['REMOTE_ADDR'] ?? '';
+    if (!is_string($ip) || $ip === '') {
+        $ip = 'unknown';
+    }
+    // Cap length / strip odd chars (wrapper also validates).
+    $ip = substr(preg_replace('/[^0-9a-fA-F.:]/', '', $ip) ?? '', 0, 64);
+    $argv = ['/usr/local/bin/nexbreak-ops-support-bundle.sh', (string) $hours];
+    if ($ip !== '') {
+        $argv[] = $ip;
+    }
+    $r = sudo_run($argv);
+    if ($r['code'] !== 0) {
+        fail(
+            500,
+            trim($r['stderr']) !== ''
+                ? trim($r['stderr'])
+                : 'support bundle failed (is nexbreak-ops-support-bundle.sh installed?)'
+        );
+    }
+    $lines = preg_split("/\r\n|\n|\r/", trim($r['stdout'])) ?: [];
+    $path = '';
+    foreach (array_reverse($lines) as $line) {
+        $line = trim($line);
+        if ($line !== '' && str_starts_with($line, '/') && str_ends_with($line, '.zip')) {
+            $path = $line;
+            break;
+        }
+    }
+    if ($path === '' || !is_file($path)) {
+        fail(500, 'support bundle produced no zip path');
+    }
+    // Only serve files under the expected support directory.
+    $real = realpath($path);
+    $supportRoot = realpath('/var/lib/nexbreak/support');
+    if ($real === false || $supportRoot === false || !str_starts_with($real, $supportRoot . DIRECTORY_SEPARATOR)) {
+        fail(500, 'refusing to serve zip outside /var/lib/nexbreak/support');
+    }
+    $basename = basename($real);
+    if (!preg_match('/^nexbreak-support-[A-Za-z0-9._-]+\.zip$/', $basename)) {
+        fail(500, 'unexpected bundle filename');
+    }
+    header('Content-Type: application/zip');
+    header('Content-Disposition: attachment; filename="' . $basename . '"');
+    header('Content-Length: ' . (string) filesize($real));
+    header('Cache-Control: no-store');
+    header('X-Content-Type-Options: nosniff');
+    // Free PHP buffers before streaming.
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    readfile($real);
+    exit;
+}
+
+header('Content-Type: application/json');
+header('Cache-Control: no-store');
 
 if ($action === 'services') {
     echo json_encode(['ok' => true, 'services' => batch_unit_status(list_ops_units())]);

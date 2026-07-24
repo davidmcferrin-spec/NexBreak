@@ -848,6 +848,16 @@ select.route-source {
 [data-tip] { cursor: help; border-bottom: 1px dotted var(--dim); }
 
 /* Services (NexVUE-style ops) */
+.support-bundle-bar {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.support-bundle-bar select {
+  min-width: 9em;
+}
+
 .ops-layout {
   flex: 1;
   min-height: 0;
