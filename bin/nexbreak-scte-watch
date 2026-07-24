@@ -383,8 +383,8 @@ def _auto_inject_loop(
         try:
             xml = scte35_xml(splice_type=st, event_id=eid)
             assert xml is not None
-            _udp_inject(xml, splice_udp_port)
-            time.sleep(0.25)
+            # Single send: proc's spliceinject is long-lived and PTS-locked,
+            # and the splicemonitor confirms delivery — no repeat needed.
             _udp_inject(xml, splice_udp_port)
             detail = (
                 f"verify auto-inject xml event_id={eid} → udp/{splice_udp_port}"

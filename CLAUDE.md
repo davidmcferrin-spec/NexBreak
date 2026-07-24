@@ -179,10 +179,12 @@ Done:
  dropped) + splicemonitor events — at `/run/nexbreak/splicemon/<svc>.json`,
  in the proc `status` reply (`splice_monitor`), and via controller
  `GET /v1/processing/<id>/splicemon`. Verify page shows an "Insertion
- engine" panel from it. Roll/splice commands are now sent 3× (150ms apart,
- `NEXBREAK_SPLICE_SEND_COUNT`/`_GAP_MS`) because spliceinject injects
- immediate inserts exactly once (one TS packet; `--inject-count` only
- applies to pts_time commands). Key spliceinject facts (verified in TSDuck
+ engine" panel from it. Splice command sends are single-shot (one trigger
+ = one splice_insert in the stream) — the splicemonitor confirms delivery,
+ so repeats aren't needed; `NEXBREAK_SPLICE_SEND_COUNT`/`_GAP_MS` can
+ restore repeats on a lossy path. spliceinject injects immediate inserts
+ exactly once per command (one TS packet; `--inject-count` only applies
+ to pts_time commands). Key spliceinject facts (verified in TSDuck
  source): nothing is injected — keepalives included — before PTS lock on
  the service video/PCR PID, and only null packets are replaced (hence
  `--add-input-stuffing 1/8`). Env gates: `NEXBREAK_TSP_VERBOSE=0`,
@@ -204,8 +206,8 @@ Done:
  server default 0) because they are real SCTE-35 markers downstream
  receivers act on. Test cues use event ids 0x50000000–0x5FFFFFFF and are
  badged "test" in Sent/Received; duplicate copies of the same command
- (proc sends x3, test cues x2 — intentional, idempotent) collapse into one
- Received row with a ×N repeat counter (30s window, scte-watch). There is
+ (only when NEXBREAK_SPLICE_SEND_COUNT>1) collapse into one Received row
+ with a ×N repeat counter (30s window, scte-watch). There is
  no command queue anywhere in the splice path: spliceinject injects
  immediates on arrival, UDP does not backlog.
 - `web/` UI: Dashboard, Roll (with live preview + CC overlay + policy cycle), Preview,

@@ -684,16 +684,17 @@ def _send_to_spliceinject(payload: bytes) -> None:
 def _splice_send_plan() -> tuple[int, float]:
     """(count, gap_s) for repeated splice command sends.
 
-    An immediate splice_insert is injected exactly once by spliceinject — one
-    188-byte packet in the whole stream (--inject-count only applies to
-    commands carrying pts_time). Repeating the same command (same event_id)
-    is cheap insurance for downstream receivers and our own verify taps;
-    duplicates are idempotent for compliant splicers.
+    Default is a single send: one trigger = one splice_insert in the stream.
+    The in-chain splicemonitor confirms every injection losslessly, so repeat
+    copies are no longer needed as delivery insurance — and while duplicates
+    (same event_id) are idempotent for compliant splicers, sloppier downstream
+    gear can treat each "immediate" copy as a fresh trigger. Set
+    NEXBREAK_SPLICE_SEND_COUNT>1 to restore repeats if a lossy path needs them.
     """
     try:
-        count = max(1, int(os.environ.get("NEXBREAK_SPLICE_SEND_COUNT", "3")))
+        count = max(1, int(os.environ.get("NEXBREAK_SPLICE_SEND_COUNT", "1")))
     except ValueError:
-        count = 3
+        count = 1
     try:
         gap_ms = max(0, int(os.environ.get("NEXBREAK_SPLICE_SEND_GAP_MS", "150")))
     except ValueError:

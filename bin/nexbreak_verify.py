@@ -326,10 +326,8 @@ def probe_scte_feed(
                 event_id=test_event_id,
             )
             assert xml is not None
-            _udp_inject_scte_xml(xml, int(splice_udp_port))
-            # Immediate commands are inserted once; send a second copy in case
-            # the first datagram arrived before PTS lock.
-            time.sleep(0.4)
+            # Single send: the target spliceinject lives in nexbreak-proc and
+            # is already PTS-locked; one trigger = one insert in the stream.
             _udp_inject_scte_xml(xml, int(splice_udp_port))
             inject_meta["ok"] = True
         except Exception as exc:  # noqa: BLE001
