@@ -759,29 +759,10 @@ body.nb-modal-open {
   overflow: hidden;
 }
 
-.router-matrix {
-  display: grid;
-  gap: 8px;
+select.route-source {
+  max-width: 14rem;
+  font-size: 12px;
 }
-
-.router-row {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr auto;
-  gap: 10px;
-  align-items: center;
-  background: var(--bg);
-  border: 1px solid var(--edge);
-  border-radius: 4px;
-  padding: 10px;
-}
-
-@media (max-width: 720px) {
-  .router-row {
-    grid-template-columns: 1fr;
-  }
-}
-
-.arrow { color: var(--acc); font-weight: 700; text-align: center; }
 
 .toast-host {
   position: fixed;

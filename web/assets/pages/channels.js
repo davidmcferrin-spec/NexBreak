@@ -6,6 +6,7 @@
   var tipEl = document.getElementById("field-tip");
   var lastProc = [];
   var lastEgr = [];
+  var assignments = {}; // egress_channel_id → processing_channel_id
   var unitStatus = {}; // unit name → { state, enabled }
   var tipTimer = null;
   var tipAnchor = null;
@@ -253,13 +254,59 @@
     if (hidden) hidden.value = out != null ? String(out) : "";
   }
 
+  function fillSourceSelect(sel, egressId) {
+    if (!sel) return;
+    var cur = assignments[egressId];
+    var html = '<option value="">— pick input —</option>';
+    lastProc.forEach(function (inn) {
+      html +=
+        '<option value="' +
+        api.esc(String(inn.id)) +
+        '"' +
+        (Number(cur) === Number(inn.id) ? " selected" : "") +
+        ">" +
+        api.esc(inn.name) +
+        " (@" +
+        api.esc(inn.service_name) +
+        ")</option>";
+    });
+    sel.innerHTML = html;
+  }
+
+  async function applyRouting(egressId, processingId, label, quiet) {
+    var pid = Number(processingId);
+    var eid = Number(egressId);
+    if (!pid) {
+      api.toast("Pick a processing source", "error");
+      return false;
+    }
+    if (Number(assignments[eid]) === pid) return true;
+    var res = await api.post("/v1/routing", {
+      processing_channel_id: pid,
+      egress_channel_id: eid,
+    });
+    if (!res.ok || !res.data || !res.data.ok) {
+      api.toast((res.data && res.data.error) || "Routing failed", "error");
+      return false;
+    }
+    assignments[eid] = pid;
+    if (!quiet) api.toast((label || "Egress") + " ← reassigned", "success");
+    return true;
+  }
+
   function renderList(el, channels, kind) {
     if (!channels.length) {
       el.innerHTML = '<div class="empty">None</div>';
       return;
     }
+    var head =
+      kind === "egr"
+        ? "<th>Status</th><th>Name</th><th>Type</th><th>Source</th><th>Bitrate</th><th>Svc</th><th></th>"
+        : "<th>Status</th><th>Name</th><th>Type</th><th>Bitrate</th><th>Svc</th><th></th>";
     el.innerHTML =
-      '<table class="data"><thead><tr><th>Status</th><th>Name</th><th>Type</th><th>Bitrate</th><th>Svc</th><th></th></tr></thead><tbody>' +
+      '<table class="data"><thead><tr>' +
+      head +
+      "</tr></thead><tbody>" +
       channels
         .map(function (c) {
           var detail = "";
@@ -326,6 +373,13 @@
                 '">Copy URL</button>';
             }
           }
+          var sourceCell = "";
+          if (kind === "egr") {
+            sourceCell =
+              '<td><select class="route-source" data-egress-id="' +
+              api.esc(String(c.id)) +
+              '" title="Processing input that feeds this egress"></select></td>';
+          }
           return (
             "<tr><td>" +
             statusBadge(kind, c) +
@@ -336,9 +390,11 @@
             detail +
             "</td><td>" +
             api.esc(c.input_type || c.output_type) +
-            '</td><td class="muted" title="sensed in / output target">' +
+            "</td>" +
+            sourceCell +
+            '<td class="muted" title="sensed in / output target">' +
             api.esc(fmtBitrate(c)) +
-            "</td><td class=\"muted\">@" +
+            '</td><td class="muted">@' +
             api.esc(c.service_name) +
             "</td><td>" +
             actions +
@@ -347,6 +403,20 @@
         })
         .join("") +
       "</tbody></table>";
+
+    if (kind === "egr") {
+      el.querySelectorAll("select.route-source").forEach(function (sel) {
+        fillSourceSelect(sel, Number(sel.getAttribute("data-egress-id")));
+        sel.addEventListener("change", async function () {
+          var eid = Number(sel.getAttribute("data-egress-id"));
+          var egr = lastEgr.find(function (c) {
+            return Number(c.id) === eid;
+          });
+          var ok = await applyRouting(eid, sel.value, egr ? egr.name : "Egress");
+          if (!ok) fillSourceSelect(sel, eid);
+        });
+      });
+    }
 
     el.querySelectorAll("[data-edit]").forEach(function (btn) {
       btn.addEventListener("click", function () {
@@ -522,6 +592,7 @@
     document.getElementById("e-hls_push_url").value = ch.hls_push_url || "";
     setBitrateReadout("e", ch);
     document.getElementById("e-enabled").value = String(Number(ch.enabled) || 0);
+    fillSourceSelect(document.getElementById("e-source"), ch.id);
     var sub = document.getElementById("egr-modal-sub");
     if (sub) {
       sub.textContent = "@" + (ch.service_name || id) + " · #" + id;
@@ -552,9 +623,10 @@
 
   async function load() {
     // Paint channel tables from controller first; overlay unit pills when ops returns.
-    var [proc, egr] = await Promise.all([
+    var [proc, egr, routing] = await Promise.all([
       api.get("/v1/processing"),
       api.get("/v1/egress"),
+      api.get("/v1/routing"),
     ]);
     if (!proc.ok) {
       document.getElementById("proc-list").innerHTML =
@@ -563,6 +635,12 @@
     }
     lastProc = proc.data.channels || [];
     lastEgr = (egr.data && egr.data.channels) || [];
+    assignments = {};
+    if (routing.ok) {
+      (routing.data.assignments || []).forEach(function (a) {
+        assignments[a.egress_channel_id] = a.processing_channel_id;
+      });
+    }
     renderList(document.getElementById("proc-list"), lastProc, "proc");
     renderList(document.getElementById("egr-list"), lastEgr, "egr");
     updateProcSummary();
@@ -712,6 +790,7 @@
 
   document.getElementById("btn-egr-save").addEventListener("click", async function () {
     var id = document.getElementById("e-id").value;
+    var sourceId = Number(document.getElementById("e-source").value);
     var body = {
       name: document.getElementById("e-name").value,
       output_type: document.getElementById("e-output_type").value,
@@ -731,6 +810,10 @@
     if (!res.ok || !res.data || !res.data.ok) {
       api.toast((res.data && res.data.error) || "Save failed", "error");
       return;
+    }
+    if (sourceId) {
+      var routed = await applyRouting(id, sourceId, body.name || "Egress", true);
+      if (!routed) return;
     }
     api.toast("Egress saved — restart nexbreak-egress@" + id, "success");
     closeModal(egrModal);

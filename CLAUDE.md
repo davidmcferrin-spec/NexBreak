@@ -239,7 +239,9 @@ Done:
  paces the local feed (`NEXBREAK_FEED_REGULATE=0` to disable). Egress
  ffmpeg paths no longer use `discardcorrupt`.
 - `web/` UI: Dashboard, Roll (with live preview + CC overlay + policy cycle), Preview,
-  Channels (processing + egress editors; Copy URL for SRT listener / HLS M3U8), Router, Captions, Verify, Services
+  Channels (processing + egress editors; Source dropdown routes input→egress;
+  Copy URL for SRT listener / HLS M3U8; former Router page redirects here),
+  Captions, Verify, Services
   (systemd/journal via allowlisted sudo wrappers — no controller), Metrics (host
   CPU/mem/disk/uptime/GPU + audit-derived splice/config/routing activity), Audit;
   `/api` PHP proxy to controller/verify

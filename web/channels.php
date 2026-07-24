@@ -8,7 +8,7 @@ require __DIR__ . '/include/header.php';
 <div class="page-header">
   <div>
     <h1>Channels</h1>
-    <p class="sub">Processing inputs and egress destinations — edit opens a focused modal</p>
+    <p class="sub">Processing inputs, egress destinations, and which input feeds each output</p>
   </div>
   <button type="button" id="btn-refresh">Refresh</button>
 </div>
@@ -45,7 +45,7 @@ require __DIR__ . '/include/header.php';
         <fieldset class="field-section">
           <legend>Basics</legend>
           <div class="form-grid">
-            <label class="field" data-help="Display name in Roll, Router, Verify, and Audit.">
+            <label class="field" data-help="Display name in Roll, Verify, and Audit.">
               <span class="field-label">Name</span>
               <input name="name" id="p-name" required>
             </label>
@@ -233,7 +233,7 @@ require __DIR__ . '/include/header.php';
         <fieldset class="field-section">
           <legend>Basics</legend>
           <div class="form-grid">
-            <label class="field" data-help="Display name in Router, Verify, and Services.">
+            <label class="field" data-help="Display name in Verify and Services.">
               <span class="field-label">Name</span>
               <input id="e-name" required>
             </label>
@@ -250,6 +250,10 @@ require __DIR__ . '/include/header.php';
                 <option value="srt">SRT</option>
                 <option value="hls">HLS</option>
               </select>
+            </label>
+            <label class="field" data-help="Which processing input’s post-splice feed this egress delivers. Same assignment as the Source column in the egress list — no separate Router page.">
+              <span class="field-label">Source (input)</span>
+              <select id="e-source"></select>
             </label>
           </div>
         </fieldset>
