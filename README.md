@@ -62,6 +62,7 @@ Web/panel → GET|POST /api/v1/splice?preset=roll&processing_channel_id=1
          → if splice_insertion_delay_ms > 0: wait (hold trigger)
          → UDP SCTE-35 XML/hex → tsp spliceinject
            (if offset < 0: video already held by timeshift before inject)
+         → null-strip → pcrbitrate → regulate → local UDP feed → SRT/HLS
 ```
 
 Panel / StreamDeck / DNF USP3-16 URL cookbook: **[`docs/panel-api.md`](docs/panel-api.md)**.

@@ -229,8 +229,15 @@ Done:
  (`local_feed_port+2000`) feeds the preview publisher *before* the hold so
  Roll-page triggering still aligns. Hot-apply via proc `config_set`;
  pipeline restarts when entering/leaving/changing a negative value.
- Channels UI shows frame-equivalent hint (~33 ms @29.97); Roll shows
- "trigger held" / "video held".
+ Channels UI: horizontal slider (−2s video hold … 0 … +2s trigger hold)
+ with live ms/frame hint; Roll shows "trigger held" / "video held".
+- Feed smoothness (2026-07-23): shared proc path was the hitch source for
+ both SRT and HLS — stuffing then null-strip with no pacing + aggressive
+ ingest `nobuffer+discardcorrupt`. Defaults now: softer ingest (real RTSP
+ probe, `-copyts` on remux; `NEXBREAK_INGEST_LOW_DELAY=1` restores the old
+ ultra-low-delay flags), and after null-strip `-P pcrbitrate -P regulate`
+ paces the local feed (`NEXBREAK_FEED_REGULATE=0` to disable). Egress
+ ffmpeg paths no longer use `discardcorrupt`.
 - `web/` UI: Dashboard, Roll (with live preview + CC overlay + policy cycle), Preview,
   Channels (processing + egress editors; Copy URL for SRT listener / HLS M3U8), Router, Captions, Verify, Services
   (systemd/journal via allowlisted sudo wrappers — no controller), Metrics (host

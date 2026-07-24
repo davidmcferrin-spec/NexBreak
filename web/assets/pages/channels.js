@@ -1,11 +1,87 @@
 "use strict";
 (function () {
   var api = window.NexBreakAPI;
-  var procEditor = document.getElementById("proc-editor");
-  var egrEditor = document.getElementById("egr-editor");
+  var procModal = document.getElementById("proc-modal");
+  var egrModal = document.getElementById("egr-modal");
+  var tipEl = document.getElementById("field-tip");
   var lastProc = [];
   var lastEgr = [];
   var unitStatus = {}; // unit name → { state, enabled }
+  var tipTimer = null;
+  var tipAnchor = null;
+
+  function openModal(modal) {
+    if (!modal) return;
+    modal.hidden = false;
+    document.body.classList.add("nb-modal-open");
+  }
+
+  function closeModal(modal) {
+    if (!modal) return;
+    modal.hidden = true;
+    if (
+      (procModal && !procModal.hidden) ||
+      (egrModal && !egrModal.hidden)
+    ) {
+      return;
+    }
+    document.body.classList.remove("nb-modal-open");
+    hideTip();
+  }
+
+  function hideTip() {
+    if (tipTimer) {
+      clearTimeout(tipTimer);
+      tipTimer = null;
+    }
+    tipAnchor = null;
+    if (tipEl) tipEl.hidden = true;
+  }
+
+  function showTip(anchor) {
+    if (!tipEl || !anchor) return;
+    var text = anchor.getAttribute("data-help");
+    if (!text) return;
+    tipEl.textContent = text;
+    tipEl.hidden = false;
+    var rect = anchor.getBoundingClientRect();
+    var tipW = tipEl.offsetWidth || 280;
+    var tipH = tipEl.offsetHeight || 60;
+    var left = Math.min(
+      window.innerWidth - tipW - 12,
+      Math.max(12, rect.left)
+    );
+    var top = rect.bottom + 8;
+    if (top + tipH > window.innerHeight - 12) {
+      top = Math.max(12, rect.top - tipH - 8);
+    }
+    tipEl.style.left = left + "px";
+    tipEl.style.top = top + "px";
+  }
+
+  function bindHelpTips(root) {
+    if (!root) return;
+    root.querySelectorAll("[data-help]").forEach(function (el) {
+      if (el.dataset.tipBound) return;
+      el.dataset.tipBound = "1";
+      el.addEventListener("mouseenter", function () {
+        hideTip();
+        tipAnchor = el;
+        tipTimer = setTimeout(function () {
+          if (tipAnchor === el) showTip(el);
+        }, 2000);
+      });
+      el.addEventListener("mouseleave", hideTip);
+      el.addEventListener("focusin", function () {
+        hideTip();
+        tipAnchor = el;
+        tipTimer = setTimeout(function () {
+          if (tipAnchor === el) showTip(el);
+        }, 2000);
+      });
+      el.addEventListener("focusout", hideTip);
+    });
+  }
 
   function unitName(kind, serviceName) {
     var prefix = kind === "proc" ? "nexbreak-proc@" : "nexbreak-egress@";
@@ -82,26 +158,33 @@
   function updateDelayHint() {
     var el = document.getElementById("p-delay-hint");
     var input = document.getElementById("p-delay");
-    if (!el || !input) return;
+    var valueEl = document.getElementById("p-delay-value");
+    if (!input) return;
     var ms = clampOffsetMs(Number(input.value));
+    if (String(input.value) !== String(ms)) input.value = String(ms);
+    input.setAttribute("aria-valuenow", String(ms));
     var frames = (Math.abs(ms) / FRAME_MS).toFixed(1);
+    var signed = (ms > 0 ? "+" : "") + ms + " ms";
+    if (valueEl) valueEl.textContent = signed;
+    if (!el) return;
     var meaning;
     if (ms > 0) {
       meaning =
-        "+" +
+        "Trigger held " +
         ms +
-        " ms holds the trigger (~" +
+        " ms (~" +
         frames +
         " frames @29.97) — splice lands later in video";
     } else if (ms < 0) {
       meaning =
-        ms +
-        " ms holds the video (~" +
+        "Video held " +
+        Math.abs(ms) +
+        " ms (~" +
         frames +
         " frames) — adds feed latency; splice can land earlier. Pipeline restart on save.";
     } else {
       meaning =
-        "0 ms — no timing offset. + holds trigger · − holds video · ~33 ms = 1 frame @29.97";
+        "No offset — drag left to hold video, right to hold trigger (~33 ms = 1 frame @29.97)";
     }
     el.textContent = meaning;
   }
@@ -344,8 +427,10 @@
     document.querySelectorAll(".proc-rtsp-url").forEach(function (el) {
       el.hidden = type !== "rtsp" || rtspRole === "server_push";
     });
-    document.getElementById("proc-rtsp-push-warn").hidden =
-      type !== "rtsp" || rtspRole !== "server_push";
+    var pushWarn = document.getElementById("proc-rtsp-push-warn");
+    if (pushWarn) {
+      pushWarn.hidden = type !== "rtsp" || rtspRole !== "server_push";
+    }
   }
 
   function openProcEdit(id) {
@@ -353,7 +438,7 @@
       return Number(c.id) === id;
     });
     if (!ch) return;
-    egrEditor.hidden = true;
+    closeModal(egrModal);
     document.getElementById("p-id").value = ch.id;
     document.getElementById("p-name").value = ch.name || "";
     document.getElementById("p-input_type").value = ch.input_type || "rtsp";
@@ -364,6 +449,7 @@
     document.getElementById("p-srt_remote_host").value = ch.srt_remote_host || "";
     document.getElementById("p-srt_remote_port").value = ch.srt_remote_port || "";
     document.getElementById("p-srt_listen_port").value = ch.srt_listen_port || "";
+    document.getElementById("p-srt_paste").value = "";
     document.getElementById("p-decklink").value =
       ch.decklink_device_index != null ? ch.decklink_device_index : "";
     document.getElementById("p-ingest_mode").value = ch.ingest_mode || "copy";
@@ -381,9 +467,15 @@
     document.getElementById("p-caption-policy").value =
       ch.caption_policy || (Number(ch.captioning_enabled) ? "auto" : "off");
     document.getElementById("p-enabled").value = String(Number(ch.enabled) || 0);
+    var sub = document.getElementById("proc-modal-sub");
+    if (sub) {
+      sub.textContent = "@" + (ch.service_name || id) + " · #" + id;
+    }
     syncProcFields();
-    procEditor.hidden = false;
-    procEditor.scrollIntoView({ behavior: "smooth", block: "start" });
+    openModal(procModal);
+    bindHelpTips(procModal);
+    var nameInput = document.getElementById("p-name");
+    if (nameInput) nameInput.focus();
   }
 
   function syncEgrFields() {
@@ -405,8 +497,10 @@
     document.querySelectorAll(".egr-hls-push").forEach(function (el) {
       el.hidden = type !== "hls" || hlsMode !== "push_put";
     });
-    document.getElementById("egr-hls-warn").hidden =
-      type !== "hls" || hlsMode !== "push_put";
+    var hlsWarn = document.getElementById("egr-hls-warn");
+    if (hlsWarn) {
+      hlsWarn.hidden = type !== "hls" || hlsMode !== "push_put";
+    }
     refreshEgrClientUrl();
   }
 
@@ -415,7 +509,7 @@
       return Number(c.id) === id;
     });
     if (!ch) return;
-    procEditor.hidden = true;
+    closeModal(procModal);
     document.getElementById("e-id").value = ch.id;
     document.getElementById("e-service_name").value = ch.service_name || "";
     document.getElementById("e-name").value = ch.name || "";
@@ -428,9 +522,15 @@
     document.getElementById("e-hls_push_url").value = ch.hls_push_url || "";
     setBitrateReadout("e", ch);
     document.getElementById("e-enabled").value = String(Number(ch.enabled) || 0);
+    var sub = document.getElementById("egr-modal-sub");
+    if (sub) {
+      sub.textContent = "@" + (ch.service_name || id) + " · #" + id;
+    }
     syncEgrFields();
-    egrEditor.hidden = false;
-    egrEditor.scrollIntoView({ behavior: "smooth", block: "start" });
+    openModal(egrModal);
+    bindHelpTips(egrModal);
+    var nameInput = document.getElementById("e-name");
+    if (nameInput) nameInput.focus();
   }
 
   async function fetchUnitStatus() {
@@ -472,12 +572,22 @@
     });
   }
 
-  document.getElementById("btn-proc-cancel").addEventListener("click", function () {
-    procEditor.hidden = true;
+  document.querySelectorAll("[data-close-proc]").forEach(function (el) {
+    el.addEventListener("click", function () {
+      closeModal(procModal);
+    });
   });
-  document.getElementById("btn-egr-cancel").addEventListener("click", function () {
-    egrEditor.hidden = true;
+  document.querySelectorAll("[data-close-egr]").forEach(function (el) {
+    el.addEventListener("click", function () {
+      closeModal(egrModal);
+    });
   });
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Escape") return;
+    if (procModal && !procModal.hidden) closeModal(procModal);
+    else if (egrModal && !egrModal.hidden) closeModal(egrModal);
+  });
+
   document.getElementById("p-input_type").addEventListener("change", syncProcFields);
   document.getElementById("p-srt_mode").addEventListener("change", syncProcFields);
   document.getElementById("p-rtsp_role").addEventListener("change", syncProcFields);
@@ -590,7 +700,7 @@
       msg = "Processing saved — splice timing offset applied live";
     }
     api.toast(msg, "success");
-    procEditor.hidden = true;
+    closeModal(procModal);
     load();
   });
 
@@ -623,7 +733,7 @@
       return;
     }
     api.toast("Egress saved — restart nexbreak-egress@" + id, "success");
-    egrEditor.hidden = true;
+    closeModal(egrModal);
     load();
   });
 

@@ -528,6 +528,237 @@ table.asr-live td {
   color: var(--dim);
 }
 
+/* —— Modals (Channels editors) —— */
+.nb-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px 24px;
+  overflow: auto;
+}
+
+.nb-modal[hidden] {
+  display: none !important;
+}
+
+.nb-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+}
+
+.nb-modal-card {
+  position: relative;
+  z-index: 1;
+  width: min(720px, 100%);
+  max-height: calc(100vh - 72px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.nb-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--edge);
+  flex-shrink: 0;
+}
+
+.nb-modal-head h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.nb-modal-sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+.nb-modal-x {
+  background: transparent;
+  color: var(--dim);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-size: 22px;
+  line-height: 1;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.nb-modal-x:hover {
+  color: var(--text);
+  border-color: var(--edge);
+}
+
+.nb-modal-body {
+  padding: 14px 16px;
+  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.nb-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--edge);
+  flex-shrink: 0;
+}
+
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.field-section {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.field-section[hidden] {
+  display: none !important;
+}
+
+.field-section legend {
+  padding: 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--acc);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.field[hidden] {
+  display: none !important;
+}
+
+.field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.field[data-help] .field-label::after {
+  content: "?";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--edge);
+  font-size: 10px;
+  color: var(--dim);
+  line-height: 1;
+}
+
+.field[data-help]:hover .field-label::after {
+  border-color: var(--acc);
+  color: var(--acc);
+}
+
+.field-hint {
+  margin: 8px 0 0;
+  font-size: 0.85rem;
+}
+
+/* Splice timing offset: −2s … 0 … +2s */
+.offset-slider {
+  margin: 14px 0 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--log-bg);
+}
+
+.offset-slider-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.offset-slider-head .field-label {
+  margin: 0;
+}
+
+.offset-slider-head strong {
+  font-variant-numeric: tabular-nums;
+  color: var(--acc);
+  font-size: 0.95rem;
+}
+
+.offset-slider-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--dim);
+  margin-bottom: 4px;
+}
+
+.offset-slider input[type="range"] {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--acc);
+  cursor: pointer;
+}
+
+.offset-slider #p-delay-hint {
+  margin-top: 8px;
+}
+
+.muted-note {
+  margin-top: 12px;
+  font-size: 12px;
+}
+
+.field-tip {
+  position: fixed;
+  z-index: 120;
+  max-width: min(360px, calc(100vw - 24px));
+  padding: 10px 12px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--acc);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+.field-tip[hidden] {
+  display: none !important;
+}
+
+body.nb-modal-open {
+  overflow: hidden;
+}
+
 .router-matrix {
   display: grid;
   gap: 8px;

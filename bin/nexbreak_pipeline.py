@@ -200,11 +200,16 @@ def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
     """
     ffmpeg argv that writes MPEG-TS to stdout (piped into tsp).
     RTSP options are applied only for input_type=rtsp (never for srt://).
+
+    Default flags favor smooth national-path remux (allow input buffering,
+    preserve source timestamps on copy). Ultra-low-delay / aggressive discard
+    is opt-in via NEXBREAK_INGEST_LOW_DELAY=1.
     """
     url = build_input_url(channel)
     kind = channel["input_type"]
     mode = (channel.get("ingest_mode") or "copy").lower()
     bitrate = int(channel.get("target_bitrate_kbps") or 14000)
+    low_delay = _env_flag("NEXBREAK_INGEST_LOW_DELAY", False)
 
     argv = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
 
@@ -212,13 +217,23 @@ def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
         transport = (channel.get("rtsp_transport") or "tcp").lower()
         if transport not in ("tcp", "udp"):
             transport = "tcp"
-        # Live RTSP pull: prefer TCP, short probe, reconnect-friendly timeouts.
+        # Live RTSP pull: prefer TCP. Short probe + nobuffer causes hitching on
+        # national/CDN paths; keep a real probe window unless low-delay is set.
+        argv += ["-rtsp_transport", transport]
+        if low_delay:
+            argv += [
+                "-fflags", "nobuffer+genpts+discardcorrupt",
+                "-flags", "low_delay",
+                "-probesize", "32",
+                "-analyzeduration", "0",
+            ]
+        else:
+            # Real probe window; keep source timestamps (paired with -copyts below).
+            argv += [
+                "-probesize", "1000000",
+                "-analyzeduration", "2000000",
+            ]
         argv += [
-            "-rtsp_transport", transport,
-            "-fflags", "nobuffer+genpts+discardcorrupt",
-            "-flags", "low_delay",
-            "-probesize", "32",
-            "-analyzeduration", "0",
             "-timeout", "5000000",
             "-i", url,
         ]
@@ -228,9 +243,12 @@ def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
     else:
         # SRT (and anything else ffmpeg understands as a URL).
         # Mid-GOP join on HEVC prints PPS warnings until the next IDR — normal for copy.
+        if low_delay:
+            argv += [
+                "-fflags", "nobuffer+genpts+discardcorrupt",
+                "-flags", "low_delay",
+            ]
         argv += [
-            "-fflags", "nobuffer+genpts+discardcorrupt",
-            "-flags", "low_delay",
             "-analyzeduration", "2000000",
             "-probesize", "1000000",
             "-i", url,
@@ -248,7 +266,10 @@ def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
             "-preset", "veryfast",
             "-tune", "zerolatency",
             "-b:v", f"{bitrate}k",
+            "-maxrate", f"{bitrate}k",
+            "-bufsize", f"{bitrate * 2}k",
             "-g", "60",
+            "-fps_mode", "cfr",
             "-c:a", a_ffmpeg,
             "-b:a", "128k",
             "-ac", "2",
@@ -256,7 +277,8 @@ def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
         ]
     else:
         # Remux all elementary streams so embedded captions (A/53 SEI / data) survive.
-        argv += ["-map", "0", "-c", "copy"]
+        # -copyts keeps source PCR/PTS spacing intact (avoids genpts rewrite stutter).
+        argv += ["-map", "0", "-c", "copy", "-copyts"]
 
     # MPEG-TS on stdout for tsp -I file -
     argv += ["-f", "mpegts", "-mpegts_flags", "+resend_headers", "pipe:1"]
@@ -394,6 +416,41 @@ def timeshift_packets_for_ms(ms: int, sensed_kbps: Optional[int]) -> Optional[in
     return max(1, packets)
 
 
+def feed_regulate_enabled() -> bool:
+    """
+    Pace the local UDP feed after null-strip (default on). Without this, tsp
+    emits non-null packets in bursts and both SRT and HLS hitch the same way.
+    Override: NEXBREAK_FEED_REGULATE=0.
+    """
+    return _env_flag("NEXBREAK_FEED_REGULATE", True)
+
+
+def feed_regulate_bitrate_bps(channel: dict[str, Any]) -> Optional[int]:
+    """
+    Target bits/sec for `-P regulate` on the post-null-strip feed.
+    Prefers sensed bitrate from run-dir state, else channel target − headroom.
+    """
+    sensed: Optional[int] = None
+    st = read_bitrate_state(str(channel.get("service_name") or ""))
+    if st:
+        try:
+            sensed = (
+                int(st["sensed_bitrate_kbps"]) if st.get("sensed_bitrate_kbps") else None
+            )
+        except (TypeError, ValueError):
+            sensed = None
+    if sensed is None:
+        try:
+            tb = channel.get("target_bitrate_kbps")
+            if tb is not None:
+                sensed = max(1, int(tb) - BITRATE_HEADROOM_KBPS)
+        except (TypeError, ValueError):
+            sensed = None
+    if sensed is None or sensed <= 0:
+        return None
+    return int(sensed) * 1000
+
+
 def tsp_splice_argv(
     channel: dict[str, Any],
     tsp: str,
@@ -510,6 +567,18 @@ def tsp_splice_argv(
         ]
     argv += [
         "-P", "filter", "--negate", "--pid", "0x1FFF",
+    ]
+    # Pace the local feed so SRT/HLS readers see steady PCR spacing instead of
+    # post-stuffing bursts. pcrbitrate refreshes the estimate after null strip;
+    # regulate uses sensed/target bps when known, else PCR-derived rate.
+    if feed_regulate_enabled():
+        argv += ["-P", "pcrbitrate"]
+        reg_bps = feed_regulate_bitrate_bps(channel)
+        if reg_bps:
+            argv += ["-P", "regulate", "--bitrate", str(reg_bps)]
+        else:
+            argv += ["-P", "regulate"]
+    argv += [
         "-O", "ip", f"{out_host}:{int(feed_port)}",
     ]
     # Bind send to loopback for mcast/local feeds so packets stay on-box.
@@ -615,18 +684,20 @@ def ffmpeg_hls_egress_argv(
     hls_list = int(os.environ.get("NEXBREAK_HLS_LIST_SIZE", "10"))
     src = udp_mpegts_input_url(feed_host, feed_port, fifo_size=2000000)
 
+    # Avoid discardcorrupt on the national path — it silently drops packets
+    # (single-frame jumps). Prefer source timestamps from the paced local feed.
     return [
         ffmpeg,
         "-hide_banner",
         "-loglevel", "warning",
         "-nostdin",
-        "-fflags", "+genpts+discardcorrupt",
         "-analyzeduration", "2000000",
         "-probesize", "2000000",
         "-f", "mpegts",
         "-i", src,
         "-map", "0",
         "-c", "copy",
+        "-copyts",
         "-f", "hls",
         "-hls_time", str(max(1, hls_time)),
         "-hls_list_size", str(max(3, hls_list)),
@@ -666,19 +737,19 @@ def ffmpeg_egress_argv(
     src = udp_mpegts_input_url(feed_host, feed_port, fifo_size=2000000)
     dst = build_srt_output_url(egress)
     # Modest probe so audio sample_rate is known; avoid ultra-low-delay flags
-    # that encourage stutter on copy→SRT.
+    # and discardcorrupt (silent frame drops) on copy→SRT.
     return [
         ffmpeg,
         "-hide_banner",
         "-loglevel", "warning",
         "-nostdin",
-        "-fflags", "+genpts+discardcorrupt",
         "-analyzeduration", "2000000",
         "-probesize", "2000000",
         "-f", "mpegts",
         "-i", src,
         "-map", "0",
         "-c", "copy",
+        "-copyts",
         "-f", "mpegts",
         "-mpegts_flags", "+resend_headers",
         dst,
