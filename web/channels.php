@@ -76,7 +76,10 @@ require __DIR__ . '/include/header.php';
         <option value="transcode">Transcode</option>
       </select>
     </label>
-    <label>Splice delay (ms) <input type="number" id="p-delay" min="0" step="100"></label>
+    <label>Splice timing offset (ms)
+      <input type="number" id="p-delay" min="-2000" max="2000" step="33" title="+ holds the trigger (splice lands later in video); − holds the video (adds that much feed latency so the splice can land earlier). ~33 ms ≈ 1 frame @29.97">
+    </label>
+    <p class="muted" id="p-delay-hint" style="margin:0 0 8px;font-size:0.85rem">+ holds trigger · − holds video · ~33 ms = 1 frame @29.97</p>
     <label>SCTE-35 PID <input type="number" id="p-scte35_pid" min="16" max="8190" step="1" title="PMT stream type 0x86"></label>
     <label>Local feed port <input type="number" id="p-feed_port"></label>
     <div class="bitrate-readout" id="p-bitrate-box">

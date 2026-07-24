@@ -87,8 +87,12 @@ XML type is ignored.
 }
 ```
 
-`delay_ms` is the per-channel pre-roll (`splice_insertion_delay_ms`) unless the
-preset sets `use_channel_delay=0` or the type is `splice_cancel`.
+`delay_ms` is the positive (trigger-hold) portion of the per-channel timing
+offset (`splice_insertion_delay_ms`, clamped ±2000 ms) unless the preset sets
+`use_channel_delay=0` or the type is `splice_cancel`. Positive values sleep
+before inject; negative values hold the video in the tsp chain via timeshift
+(so the splice can land earlier relative to what the operator saw) and do not
+extend this response wait.
 
 ---
 

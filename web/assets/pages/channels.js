@@ -71,6 +71,41 @@
     return s + " / " + o;
   }
 
+  /** ~29.97 fps frame duration used only for the UI hint. */
+  var FRAME_MS = 1000 / 29.97;
+
+  function clampOffsetMs(n) {
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(-2000, Math.min(2000, Math.round(n)));
+  }
+
+  function updateDelayHint() {
+    var el = document.getElementById("p-delay-hint");
+    var input = document.getElementById("p-delay");
+    if (!el || !input) return;
+    var ms = clampOffsetMs(Number(input.value));
+    var frames = (Math.abs(ms) / FRAME_MS).toFixed(1);
+    var meaning;
+    if (ms > 0) {
+      meaning =
+        "+" +
+        ms +
+        " ms holds the trigger (~" +
+        frames +
+        " frames @29.97) — splice lands later in video";
+    } else if (ms < 0) {
+      meaning =
+        ms +
+        " ms holds the video (~" +
+        frames +
+        " frames) — adds feed latency; splice can land earlier. Pipeline restart on save.";
+    } else {
+      meaning =
+        "0 ms — no timing offset. + holds trigger · − holds video · ~33 ms = 1 frame @29.97";
+    }
+    el.textContent = meaning;
+  }
+
   /** Shareable URL for an SRT listener egress (clients connect as callers). */
   function srtListenerUrl(port) {
     var p = Number(port);
@@ -332,7 +367,9 @@
     document.getElementById("p-decklink").value =
       ch.decklink_device_index != null ? ch.decklink_device_index : "";
     document.getElementById("p-ingest_mode").value = ch.ingest_mode || "copy";
-    document.getElementById("p-delay").value = ch.splice_insertion_delay_ms || 0;
+    document.getElementById("p-delay").value =
+      ch.splice_insertion_delay_ms != null ? ch.splice_insertion_delay_ms : 0;
+    updateDelayHint();
     document.getElementById("p-scte35_pid").value =
       ch.scte35_pid != null ? ch.scte35_pid : 500;
     document.getElementById("p-feed_port").value = ch.local_feed_port || "";
@@ -500,7 +537,9 @@
         ? Number(document.getElementById("p-decklink").value)
         : null,
       ingest_mode: document.getElementById("p-ingest_mode").value,
-      splice_insertion_delay_ms: Number(document.getElementById("p-delay").value),
+      splice_insertion_delay_ms: clampOffsetMs(
+        Number(document.getElementById("p-delay").value)
+      ),
       scte35_pid: Number(document.getElementById("p-scte35_pid").value) || 500,
       local_feed_port: Number(document.getElementById("p-feed_port").value),
       preview_path: document.getElementById("p-preview_path").value || null,
@@ -536,13 +575,30 @@
       api.toast((res.data && res.data.error) || "Save failed", "error");
       return;
     }
-    api.toast(
-      "Processing saved — restart nexbreak-proc@" + id + " for ingest changes",
-      "success"
-    );
+    var offsetHot = res.data.offset_hot;
+    var msg =
+      "Processing saved — restart nexbreak-proc@" + id + " for ingest changes";
+    if (offsetHot && offsetHot.pipeline_restart) {
+      msg =
+        "Processing saved — splice video-hold applied (pipeline restarting)";
+    } else if (
+      body.splice_insertion_delay_ms != null &&
+      body.splice_insertion_delay_ms >= 0 &&
+      offsetHot &&
+      offsetHot.ok
+    ) {
+      msg = "Processing saved — splice timing offset applied live";
+    }
+    api.toast(msg, "success");
     procEditor.hidden = true;
     load();
   });
+
+  var delayInput = document.getElementById("p-delay");
+  if (delayInput) {
+    delayInput.addEventListener("input", updateDelayHint);
+    delayInput.addEventListener("change", updateDelayHint);
+  }
 
   document.getElementById("btn-egr-save").addEventListener("click", async function () {
     var id = document.getElementById("e-id").value;

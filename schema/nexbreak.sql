@@ -36,7 +36,8 @@ CREATE TABLE processing_channels (
     ingest_mode             TEXT NOT NULL DEFAULT 'copy'
                             CHECK (ingest_mode IN ('copy','transcode')),
 
-    -- Splice behavior
+    -- Splice timing offset (ms, clamped ±2000 in controller/proc):
+    --   >0 hold trigger before inject; <0 hold video (timeshift) before spliceinject
     splice_insertion_delay_ms INTEGER NOT NULL DEFAULT 0,
     -- SCTE-35 PID declared in the PMT (stream type 0x86)
     scte35_pid              INTEGER NOT NULL DEFAULT 500,

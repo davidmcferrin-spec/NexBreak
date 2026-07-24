@@ -18,6 +18,13 @@
     btnCc.setAttribute("aria-pressed", captionsOn ? "true" : "false");
   }
 
+  function offsetLabel(raw) {
+    var ms = Number(raw);
+    if (!Number.isFinite(ms) || ms === 0) return "Offset 0 ms";
+    if (ms < 0) return "Video held " + Math.abs(ms) + " ms";
+    return "Trigger held " + ms + " ms";
+  }
+
   function teardown() {
     players.forEach(function (p) {
       try {
@@ -118,9 +125,9 @@
             '<div class="preview-state muted">idle</div>'
           : '<div class="muted">Preview off</div>') +
         "</div>" +
-        '<div class="muted">Delay ' +
-        api.esc(String(ch.splice_insertion_delay_ms)) +
-        " ms · " +
+        '<div class="muted">' +
+        api.esc(offsetLabel(ch.splice_insertion_delay_ms)) +
+        " · " +
         api.esc(path) +
         '</div><div class="bar"></div>';
 

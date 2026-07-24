@@ -53,9 +53,11 @@ from nexbreak_db import (  # noqa: E402
 )
 from nexbreak_pipeline import (  # noqa: E402
     SPLICEMON_MARKER,
+    clamp_splice_offset_ms,
     ffmpeg_ingest_argv,
     ffmpeg_preview_argv,
     output_bitrate_kbps,
+    preview_feed_port_for,
     probe_mpegts_bitrate_kbps,
     require_bins,
     resolve_local_feed_host,
@@ -393,14 +395,24 @@ def _start_preview(channel: dict[str, Any], ffmpeg: str) -> None:
         return
     path = preview_path_for(channel)
     _preview_path = path
+    preview_port = preview_feed_port_for(channel)
+    offset_ms = clamp_splice_offset_ms(channel.get("splice_insertion_delay_ms"))
     _preview_argv = ffmpeg_preview_argv(
         ffmpeg=ffmpeg,
         feed_host=channel["local_feed_host"] or "127.0.0.1",
-        feed_port=int(channel["local_feed_port"]),
+        feed_port=preview_port,
         preview_path=path,
     )
+    if offset_ms < 0:
+        log.info(
+            "preview: reading pretap (pre-timeshift) port %s — offset=%sms",
+            preview_port,
+            offset_ms,
+        )
     log.info("preview: %s", " ".join(_preview_argv))
     # Wait for local feed to carry PAT/PMT + a keyframe before attaching.
+    # Negative offset: timeshift fills for |offset| ms before feed output, but
+    # pretap is immediate — still allow PAT/PMT settle time.
     time.sleep(2.5)
     _preview = Popen(_preview_argv)
     _preview_started_at = time.time()
@@ -570,7 +582,7 @@ def _start_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
 
 
 def _restart_pipeline(channel: dict[str, Any], splice_udp: int) -> None:
-    log.info("restarting media pipeline for caption mode change")
+    log.info("restarting media pipeline (caption mode / splice offset)")
     _stop_media(stop_captions=False)
     time.sleep(0.4)
     _start_pipeline(channel, splice_udp)
@@ -726,9 +738,11 @@ def _apply_splice(
     if event_id is None:
         _event_id += 1
 
-    delay_ms = int(_channel.get("splice_insertion_delay_ms") or 0)
+    offset_ms = clamp_splice_offset_ms(_channel.get("splice_insertion_delay_ms"))
     if not use_channel_delay or splice_type == "splice_cancel":
-        delay_ms = 0
+        offset_ms = 0
+    # Positive offset = hold the trigger; negative = video already held in tsp.
+    delay_ms = max(0, offset_ms)
     if not skip_delay and delay_ms > 0:
         log.info("splice %s event_id=%s — waiting %s ms", splice_type, eid, delay_ms)
         end = time.time() + delay_ms / 1000.0
@@ -748,15 +762,27 @@ def _apply_splice(
     extra = ""
     if auto_return and break_duration_sec:
         extra = f" auto_return={break_duration_sec}s"
+    if offset_ms < 0:
+        offset_note = f" offset={offset_ms}ms(video-hold)"
+    elif offset_ms > 0:
+        offset_note = f" offset=+{offset_ms}ms(trigger-hold)"
+    else:
+        offset_note = " offset=0ms"
     # payload:<hex> suffix is machine-readable — the Verify page decodes it
     # for the Sent-side payload inspector; the Audit page strips it.
     detail = (
-        f"{kind} {len(payload)} bytes event_id={eid}{extra} "
+        f"{kind} {len(payload)} bytes event_id={eid}{extra}{offset_note} "
         f"→ udp/{_splice_udp} x{sends} payload:{payload.hex()}"
     )
 
     log.info("injected %s (%s)", splice_type, detail)
-    return {"ok": True, "event_id": eid, "detail": detail, "delay_ms": delay_ms}
+    return {
+        "ok": True,
+        "event_id": eid,
+        "detail": detail,
+        "delay_ms": delay_ms,
+        "offset_ms": offset_ms,
+    }
 
 
 def _caption_runtime() -> dict[str, Any]:
@@ -839,6 +865,37 @@ class _ControlHandler(socketserver.StreamRequestHandler):
             return
         if cmd == "caption_status":
             self._reply(_caption_runtime())
+            return
+        if cmd == "config_set":
+            # Hot-apply fields that can change without a full systemd restart.
+            # Negative (or changed-negative) splice offset rebuilds the tsp
+            # chain (timeshift / pretap); positive-only changes stay live.
+            if "splice_insertion_delay_ms" not in req:
+                self._reply(
+                    {"ok": False, "error": "splice_insertion_delay_ms required"}
+                )
+                return
+            old = clamp_splice_offset_ms(_channel.get("splice_insertion_delay_ms"))
+            new = clamp_splice_offset_ms(req.get("splice_insertion_delay_ms"))
+            _channel["splice_insertion_delay_ms"] = new
+            restart = old < 0 or new < 0
+            if restart and old != new:
+                _pipeline_restart = True
+                log.info(
+                    "splice offset %sms→%sms — pipeline restart queued "
+                    "(video-hold / pretap)",
+                    old,
+                    new,
+                )
+            else:
+                log.info("splice offset hot-set to %sms (no pipeline restart)", new)
+            self._reply(
+                {
+                    "ok": True,
+                    "splice_insertion_delay_ms": new,
+                    "pipeline_restart": bool(restart and old != new),
+                }
+            )
             return
         if cmd == "splice":
             try:
@@ -961,7 +1018,7 @@ def main() -> int:
                         ffmpeg_preview_argv(
                             ffmpeg=bins["ffmpeg"],
                             feed_host=channel["local_feed_host"] or "127.0.0.1",
-                            feed_port=int(channel["local_feed_port"]),
+                            feed_port=preview_feed_port_for(channel),
                             preview_path=ppath,
                         )
                     ),

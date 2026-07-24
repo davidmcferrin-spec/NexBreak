@@ -346,6 +346,54 @@ def splicemon_enabled() -> bool:
     return _env_flag("NEXBREAK_SPLICEMON", True)
 
 
+# Signed splice timing offset (ms). Positive = hold the trigger; negative =
+# hold the video via timeshift before spliceinject. Clamped ±2s.
+SPLICE_OFFSET_MS_MIN = -2000
+SPLICE_OFFSET_MS_MAX = 2000
+
+
+def clamp_splice_offset_ms(value: Any, default: int = 0) -> int:
+    try:
+        n = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        n = int(default)
+    return max(SPLICE_OFFSET_MS_MIN, min(SPLICE_OFFSET_MS_MAX, n))
+
+
+def pretap_port_for(channel: dict[str, Any]) -> int:
+    """
+    Pre-timeshift UDP tap for the preview publisher when the offset is negative.
+    Port map: feed=N, spliceinject=N+1000, pretap=N+2000, cc-udp=N+3000.
+    """
+    return int(channel["local_feed_port"]) + 2000
+
+
+def preview_feed_port_for(channel: dict[str, Any]) -> int:
+    """
+    Port the preview publisher should read. When the offset is negative the
+    operator's reference must come from *before* the video hold, otherwise the
+    hold delays preview and trigger equally and the knob does nothing.
+    """
+    if clamp_splice_offset_ms(channel.get("splice_insertion_delay_ms")) < 0:
+        return pretap_port_for(channel)
+    return int(channel["local_feed_port"])
+
+
+def timeshift_packets_for_ms(ms: int, sensed_kbps: Optional[int]) -> Optional[int]:
+    """
+    Fixed packet count for `-P timeshift --packets`. Sensed bitrate is from the
+    post-null-strip local feed; the timeshift sits after `--add-input-stuffing
+    1/8`, so size against stuffed rate (×9/8). Returns None to fall back to
+    `--time` (TSDuck estimates from initial PCR bitrate).
+    """
+    if ms <= 0 or not sensed_kbps or int(sensed_kbps) <= 0:
+        return None
+    packets = int(
+        round(int(sensed_kbps) * 1000 * (9.0 / 8.0) * int(ms) / (1000.0 * 188.0 * 8.0))
+    )
+    return max(1, packets)
+
+
 def tsp_splice_argv(
     channel: dict[str, Any],
     tsp: str,
@@ -355,8 +403,17 @@ def tsp_splice_argv(
     feed_port: int,
 ) -> list[str]:
     """
-    tsp chain: stuffing → PMT SCTE declare → spliceinject → splicemonitor →
-    drop nulls → UDP feed. Reads MPEG-TS from stdin (-I file -).
+    tsp chain: stuffing → [pretap fork + timeshift when offset < 0] →
+    PMT SCTE declare → spliceinject → splicemonitor → drop nulls → UDP feed.
+    Reads MPEG-TS from stdin (-I file -).
+
+    Signed splice_insertion_delay_ms:
+      * positive — hold the trigger (sleep in nexbreak-proc; not in this argv)
+      * negative — hold the video with `-P timeshift` before spliceinject so a
+        Roll can mark frames the operator already saw. timeshift emits nothing
+        until its buffer fills (startup gap of |offset| ms is expected). When
+        preview is enabled, a `-P fork` pretap tees the pre-hold stream for the
+        preview publisher.
 
     TSDuck 3.4x requires --service OR (--pid AND --pts-pid). Using --service -
     selects the first PAT service so PTS/PCR PIDs are taken from that PMT
@@ -380,6 +437,8 @@ def tsp_splice_argv(
     """
     scte_pid = int(channel.get("scte35_pid") or 500)
     out_host = resolve_local_feed_host(feed_host)
+    offset_ms = clamp_splice_offset_ms(channel.get("splice_insertion_delay_ms"))
+    hold_ms = -offset_ms if offset_ms < 0 else 0
     # Keep SCTE PID active without needing a known TS bitrate (live remux often
     # reports bitrate=0, which makes --min-bitrate a no-op).
     min_inter = int(os.environ.get("NEXBREAK_SCTE_MIN_INTER_PACKET", "400") or 400)
@@ -389,6 +448,48 @@ def tsp_splice_argv(
     argv += [
         "--add-input-stuffing", "1/8",
         "-I", "file", "-",
+    ]
+    if hold_ms > 0:
+        preview_on = int(
+            channel.get("preview_enabled")
+            if channel.get("preview_enabled") is not None
+            else 1
+        )
+        if preview_on:
+            pretap_host = resolve_local_feed_host(feed_host)
+            pretap_port = pretap_port_for(channel)
+            fork_cmd = (
+                f'{tsp} -I file - -O ip {pretap_host}:{pretap_port}'
+            )
+            if _is_multicast_host(pretap_host) or _is_loopback_host(feed_host or ""):
+                fork_cmd += " --local-address 127.0.0.1"
+            argv += ["-P", "fork", fork_cmd]
+        sensed_kbps: Optional[int] = None
+        st = read_bitrate_state(str(channel.get("service_name") or ""))
+        if st:
+            try:
+                sensed_kbps = (
+                    int(st["sensed_bitrate_kbps"])
+                    if st.get("sensed_bitrate_kbps")
+                    else None
+                )
+            except (TypeError, ValueError):
+                sensed_kbps = None
+        if sensed_kbps is None:
+            try:
+                tb = channel.get("target_bitrate_kbps")
+                if tb is not None:
+                    # Stored target ≈ output (sensed+10); back-calc for sizing.
+                    sensed_kbps = max(1, int(tb) - BITRATE_HEADROOM_KBPS)
+            except (TypeError, ValueError):
+                sensed_kbps = None
+        packets = timeshift_packets_for_ms(hold_ms, sensed_kbps)
+        argv += ["-P", "timeshift"]
+        if packets is not None:
+            argv += ["--packets", str(packets)]
+        else:
+            argv += ["--time", str(hold_ms)]
+    argv += [
         "-P", "pmt",
         "--service", "-",
         "--add-programinfo-id", "0x43554549",

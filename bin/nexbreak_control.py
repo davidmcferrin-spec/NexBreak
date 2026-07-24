@@ -69,5 +69,22 @@ def send_caption_set(
     return proc_request(sock_path, body, timeout=timeout)
 
 
+def send_config_set(
+    sock_path: str,
+    *,
+    splice_insertion_delay_ms: int,
+    timeout: float = 15.0,
+) -> dict[str, Any]:
+    """Hot-set splice timing offset on a running proc (may restart pipeline)."""
+    return proc_request(
+        sock_path,
+        {
+            "cmd": "config_set",
+            "splice_insertion_delay_ms": int(splice_insertion_delay_ms),
+        },
+        timeout=timeout,
+    )
+
+
 def send_caption_status(sock_path: str, timeout: float = 1.5) -> dict[str, Any]:
     return proc_request(sock_path, {"cmd": "caption_status"}, timeout=timeout)

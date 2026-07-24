@@ -35,8 +35,17 @@ from nexbreak_db import (  # noqa: E402
     rows_to_dicts,
     upsert_splice_preset,
 )
-from nexbreak_pipeline import enrich_channel_bitrate, read_splicemon_state  # noqa: E402
-from nexbreak_control import send_caption_set, send_caption_status, send_splice  # noqa: E402
+from nexbreak_pipeline import (  # noqa: E402
+    clamp_splice_offset_ms,
+    enrich_channel_bitrate,
+    read_splicemon_state,
+)
+from nexbreak_control import (  # noqa: E402
+    send_caption_set,
+    send_caption_status,
+    send_config_set,
+    send_splice,
+)
 from nexbreak_host import host_snapshot  # noqa: E402
 
 
@@ -144,10 +153,11 @@ def _execute_splice(
     splice_type = fire["splice_type"]
     hex_payload = fire.get("hex_payload")
     sock = control_sock_path(channel["service_name"])
-    delay_ms = int(channel.get("splice_insertion_delay_ms") or 0)
+    delay_ms = clamp_splice_offset_ms(channel.get("splice_insertion_delay_ms"))
     if not fire.get("use_channel_delay") or splice_type == "splice_cancel":
         delay_ms = 0
-    timeout = max(30.0, delay_ms / 1000.0 + 15.0)
+    # Only positive offsets sleep before inject; negatives are video-hold in tsp.
+    timeout = max(30.0, max(0, delay_ms) / 1000.0 + 15.0)
     preset = fire.get("preset")
     detail_prefix = f"preset={preset['slug']} " if preset else ""
 
@@ -1041,6 +1051,10 @@ class Handler(BaseHTTPRequestHandler):
                     fields["captioning_enabled"] = (
                         0 if fields["caption_policy"] == "off" else 1
                     )
+                if "splice_insertion_delay_ms" in fields:
+                    fields["splice_insertion_delay_ms"] = clamp_splice_offset_ms(
+                        fields["splice_insertion_delay_ms"]
+                    )
                 # Reject incomplete SRT caller/listener configs up front.
                 row = conn.execute(
                     "SELECT * FROM processing_channels WHERE id = ?", (cid,)
@@ -1089,8 +1103,9 @@ class Handler(BaseHTTPRequestHandler):
                     detail=json.dumps(fields),
                 )
                 hot = None
+                offset_hot = None
+                sock = control_sock_path(row["service_name"])
                 if "caption_policy" in fields or "captioning_enabled" in fields:
-                    sock = control_sock_path(row["service_name"])
                     try:
                         if "caption_policy" in fields:
                             hot = send_caption_set(sock, policy=fields["caption_policy"])
@@ -1102,7 +1117,25 @@ class Handler(BaseHTTPRequestHandler):
                         hot = {"ok": False, "error": "proc not running — will apply on next start"}
                     except Exception as exc:  # noqa: BLE001
                         hot = {"ok": False, "error": str(exc)}
-                self._send(200, {"ok": True, "caption_hot": hot})
+                if "splice_insertion_delay_ms" in fields:
+                    try:
+                        offset_hot = send_config_set(
+                            sock,
+                            splice_insertion_delay_ms=int(
+                                fields["splice_insertion_delay_ms"]
+                            ),
+                        )
+                    except FileNotFoundError:
+                        offset_hot = {
+                            "ok": False,
+                            "error": "proc not running — will apply on next start",
+                        }
+                    except Exception as exc:  # noqa: BLE001
+                        offset_hot = {"ok": False, "error": str(exc)}
+                self._send(
+                    200,
+                    {"ok": True, "caption_hot": hot, "offset_hot": offset_hot},
+                )
                 return
 
             if path.startswith("/v1/egress/") and path.endswith("/config"):

@@ -105,9 +105,14 @@ def _start_scte_watch(
     script = _scte_watch_script()
     if not script.is_file():
         return {"ok": False, "error": f"missing {script}"}
+    # Wait window for sent↔received matching — only positive (trigger-hold)
+    # delays stretch the window; video-hold is already in the feed path.
     delay_ms = 2000
     if processing:
-        delay_ms = int(processing.get("splice_insertion_delay_ms") or 2000)
+        try:
+            delay_ms = max(0, int(processing.get("splice_insertion_delay_ms") or 2000))
+        except (TypeError, ValueError):
+            delay_ms = 2000
     argv = [
         sys.executable,
         str(script),

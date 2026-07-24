@@ -18,8 +18,10 @@ inputs and outputs. DeckLink SDI-out is architected for but deferred past v1.
 - Full manual splice control: hex payload, splice now, delayed, auto return,
   splice_start_immediate, splice_start_normal, splice_cancel — per stream,
   triggering one stream's splice never touches another.
-- Trigger-to-insertion delay is operator-tunable per channel (compliant
-  encoders need a GOP/keyframe-aligned splice point, not an instant one).
+- Trigger-to-insertion timing offset is operator-tunable per channel
+ (±2000 ms): positive holds the trigger; negative holds the video
+ (timeshift) so a late Roll can still mark earlier frames. Compliant
+ encoders still GOP/keyframe-align the actual cut.
 - Control surfaces: REST API driven by a Streamdeck, a DNF USP3-16 panel
   (HTTP GET/POST per button — no special SDK needed), and a web UI with a
   roll button.
@@ -219,6 +221,16 @@ Done:
  or binary section); Audit/Dashboard strip the suffix for readability.
  Fixed: TSDuck XML event ids are hex ("0x0000004D") — parse_scte_xml now
  uses base-0 int, so Sent↔Received matching/dedupe actually correlate.
+- Signed splice timing offset (2026-07-23): `splice_insertion_delay_ms` is
+ now ±2000 ms. Positive = hold the trigger (existing sleep in proc).
+ Negative = hold the video via `-P timeshift` before spliceinject (adds
+ |offset| feed latency; sized by `--packets` from sensed bitrate ×9/8
+ stuffing, else `--time`). When negative and preview is on, a pretap fork
+ (`local_feed_port+2000`) feeds the preview publisher *before* the hold so
+ Roll-page triggering still aligns. Hot-apply via proc `config_set`;
+ pipeline restarts when entering/leaving/changing a negative value.
+ Channels UI shows frame-equivalent hint (~33 ms @29.97); Roll shows
+ "trigger held" / "video held".
 - `web/` UI: Dashboard, Roll (with live preview + CC overlay + policy cycle), Preview,
   Channels (processing + egress editors; Copy URL for SRT listener / HLS M3U8), Router, Captions, Verify, Services
   (systemd/journal via allowlisted sudo wrappers — no controller), Metrics (host
