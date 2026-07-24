@@ -210,6 +210,15 @@ Done:
  with a ×N repeat counter (30s window, scte-watch). There is
  no command queue anywhere in the splice path: spliceinject injects
  immediates on arrival, UDP does not backlog.
+- Payload inspector (2026-07-23): click any Sent/Received row on Verify to
+ see the exact splice payload. Received: scte-watch tables plugin now also
+ runs `--log-hexa-line=##sctehex##`, pairs hex↔XML per section (event-id
+ sanity check), stores full XML in `raw_snip` + raw section hex in new
+ `scte_sightings.raw_hex` (migrated). Sent: proc/scte-watch append
+ `payload:<hex>` to the splice audit detail — Verify decodes it (XML text
+ or binary section); Audit/Dashboard strip the suffix for readability.
+ Fixed: TSDuck XML event ids are hex ("0x0000004D") — parse_scte_xml now
+ uses base-0 int, so Sent↔Received matching/dedupe actually correlate.
 - `web/` UI: Dashboard, Roll (with live preview + CC overlay + policy cycle), Preview,
   Channels (processing + egress editors; Copy URL for SRT listener / HLS M3U8), Router, Captions, Verify, Services
   (systemd/journal via allowlisted sudo wrappers — no controller), Metrics (host

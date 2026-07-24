@@ -199,7 +199,8 @@ def parse_scte_xml(xml_text: str) -> Optional[dict[str, Any]]:
     attrs = {k.lower().replace("-", "_"): v for k, v in insert.attrib.items()}
     eid = attrs.get("splice_event_id") or attrs.get("event_id")
     try:
-        event_id = int(eid) if eid is not None else None
+        # TSDuck emits event ids as hex ("0x0000004D") — base-0 handles both.
+        event_id = int(str(eid), 0) if eid is not None else None
     except ValueError:
         event_id = None
 
@@ -408,7 +409,8 @@ def _auto_inject_loop(
             # and the splicemonitor confirms delivery — no repeat needed.
             _udp_inject(xml, splice_udp_port)
             detail = (
-                f"verify auto-inject xml event_id={eid} → udp/{splice_udp_port}"
+                f"verify auto-inject xml event_id={eid} → udp/{splice_udp_port} "
+                f"payload:{xml.encode('utf-8').hex()}"
             )
             if conn is not None:
                 try:
@@ -657,6 +659,10 @@ def main() -> int:
         )
 
     def read_tsp_stderr(stream) -> None:
+        # tables logs one hex line and one XML line per section, back to back.
+        # Stash the hex and attach it to the matching XML (event-id checked
+        # when decodable, freshness-checked otherwise).
+        pending_hex: list[Any] = [None, 0.0]  # [hex_str, ts]
         try:
             while not _stop:
                 raw = stream.readline()
@@ -671,12 +677,34 @@ def main() -> int:
                         byte_counter[0] = max(byte_counter[0], n * 188)
                     except ValueError:
                         pass
+                if SCTE_HEX_MARKER in line:
+                    idx = line.find(SCTE_HEX_MARKER)
+                    hex_chunk = line[idx + len(SCTE_HEX_MARKER) :].strip()
+                    if re.fullmatch(r"[0-9a-fA-F\s]+", hex_chunk or ""):
+                        pending_hex[0] = re.sub(r"\s+", "", hex_chunk).lower()
+                        pending_hex[1] = time.time()
+                    continue
                 if SCTE_MARKER not in line:
                     continue
                 idx = line.find(SCTE_MARKER)
                 chunk = line[idx + len(SCTE_MARKER) :].strip()
                 if chunk.startswith("<"):
-                    on_scte(chunk)
+                    raw_hex = None
+                    if pending_hex[0] and (time.time() - pending_hex[1]) <= 2.0:
+                        raw_hex = pending_hex[0]
+                        hex_eid = hex_section_event_id(raw_hex)
+                        m_eid = re.search(
+                            r'splice_event_id="(?:0x)?([0-9a-fA-F]+)"', chunk
+                        )
+                        if hex_eid is not None and m_eid:
+                            base = 16 if m_eid.group(0).find("0x") >= 0 else 10
+                            try:
+                                if int(m_eid.group(1), base) != hex_eid:
+                                    raw_hex = None
+                            except ValueError:
+                                pass
+                    pending_hex[0] = None
+                    on_scte(chunk, raw_hex)
         except Exception as exc:  # noqa: BLE001
             log.debug("tsp stderr reader ended: %s", exc)
 

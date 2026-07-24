@@ -49,7 +49,7 @@ require __DIR__ . '/include/header.php';
         <h2>Sent</h2>
         <span class="panel-meta" id="verify-injects-meta">controller / verify auto-inject</span>
       </div>
-      <p class="muted verify-col-hint">Splice commands for the routed input (Roll + optional test cues). Match by Event ID.</p>
+      <p class="muted verify-col-hint">Splice commands for the routed input (Roll + optional test cues). Match by Event ID. Click a row to inspect the exact payload sent to spliceinject.</p>
       <div id="verify-injects" class="verify-scroll">
         <div class="empty">No recent splice commands</div>
       </div>
@@ -59,7 +59,7 @@ require __DIR__ . '/include/header.php';
         <h2>Received</h2>
         <span class="panel-meta" id="verify-events-meta">TSDuck on tap</span>
       </div>
-      <p class="muted verify-col-hint">TID 0xFC on the post-splice feed while Listen is running.</p>
+      <p class="muted verify-col-hint">TID 0xFC on the post-splice feed while Listen is running. Click a row to inspect the captured payload (decoded XML + raw section hex).</p>
       <div id="verify-events" class="verify-scroll">
         <div class="empty">Click Listen — rows appear when SCTE is seen on the tap (Roll, or test cues if enabled).</div>
       </div>

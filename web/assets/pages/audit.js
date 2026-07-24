@@ -66,7 +66,14 @@
             '">' +
             api.esc(e.result) +
             "</span></td><td class=\"muted\">" +
-            api.esc(e.detail || "") +
+            // Full splice payload hex lives on the Verify page inspector —
+            // keep the audit list readable.
+            api.esc(
+              String(e.detail || "").replace(
+                /\s*payload:[0-9a-fA-F]{8,}/,
+                " [payload on Verify]"
+              )
+            ) +
             "</td></tr>"
           );
         })

@@ -872,6 +872,58 @@ td.bad { color: var(--bad); }
   cursor: default;
 }
 
+/* Payload inspector (click a Sent/Received row) */
+.verify-scroll tr[data-payload-key] {
+  cursor: pointer;
+}
+
+.payload-chevron {
+  display: inline-block;
+  width: 12px;
+  color: var(--dim);
+  font-size: 10px;
+}
+
+tr.verify-payload > td {
+  background: var(--log-bg);
+  padding: 8px 12px;
+}
+
+.payload-block {
+  margin: 4px 0;
+}
+
+.payload-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.payload-head button {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+tr.verify-payload pre {
+  margin: 0;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-x: auto;
+  white-space: pre;
+  user-select: text;
+  cursor: text;
+}
+
 @media (max-width: 900px) {
   .verify-compare {
     grid-template-columns: 1fr;

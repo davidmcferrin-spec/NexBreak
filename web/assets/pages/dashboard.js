@@ -52,7 +52,12 @@
               '">' +
               api.esc(e.result) +
               "</span></td><td class=\"muted\">" +
-              api.esc(e.detail || e.splice_type || "") +
+              api.esc(
+                String(e.detail || e.splice_type || "").replace(
+                  /\s*payload:[0-9a-fA-F]{8,}/,
+                  ""
+                )
+              ) +
               "</td></tr>"
             );
           })

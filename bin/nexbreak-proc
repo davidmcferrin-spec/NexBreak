@@ -748,9 +748,11 @@ def _apply_splice(
     extra = ""
     if auto_return and break_duration_sec:
         extra = f" auto_return={break_duration_sec}s"
+    # payload:<hex> suffix is machine-readable — the Verify page decodes it
+    # for the Sent-side payload inspector; the Audit page strips it.
     detail = (
         f"{kind} {len(payload)} bytes event_id={eid}{extra} "
-        f"→ udp/{_splice_udp} x{sends}"
+        f"→ udp/{_splice_udp} x{sends} payload:{payload.hex()}"
     )
 
     log.info("injected %s (%s)", splice_type, detail)

@@ -48,6 +48,163 @@
     return Number.isFinite(n) && n >= 0x50000000 && n <= 0x5fffffff;
   }
 
+  // ---- payload inspector -------------------------------------------------
+  var payloadStore = {}; // row key -> {xml, hex, note}
+  var expandedPayloads = {}; // row key -> true
+
+  function cleanHex(hex) {
+    return String(hex || "").replace(/[^0-9a-fA-F]/g, "").toLowerCase();
+  }
+
+  function hexToUtf8(hex) {
+    var clean = cleanHex(hex);
+    if (!clean || clean.length % 2) return null;
+    try {
+      var bytes = new Uint8Array(
+        clean.match(/.{2}/g).map(function (h) {
+          return parseInt(h, 16);
+        })
+      );
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function formatHex(hex) {
+    var clean = cleanHex(hex);
+    var lines = [];
+    for (var i = 0; i < clean.length; i += 32) {
+      lines.push(clean.slice(i, i + 32).match(/.{1,2}/g).join(" "));
+    }
+    return lines.join("\n");
+  }
+
+  function formatXml(xml) {
+    var out = [];
+    var depth = 0;
+    String(xml)
+      .replace(/>\s+</g, "><")
+      .split(/(?=<)/)
+      .forEach(function (tok) {
+        tok = tok.trim();
+        if (!tok) return;
+        if (/^<\//.test(tok)) depth = Math.max(0, depth - 1);
+        out.push(new Array(depth + 1).join("  ") + tok);
+        if (/^<[^!?/][^>]*[^/]>$/.test(tok)) depth += 1;
+      });
+    return out.join("\n");
+  }
+
+  // Sent rows carry the exact wire payload as a "payload:<hex>" audit suffix.
+  function payloadFromDetail(detail) {
+    var m = String(detail || "").match(/payload:([0-9a-fA-F]+)/);
+    if (!m) return null;
+    var text = hexToUtf8(m[1]);
+    if (text && text.charAt(0) === "<") {
+      return { xml: text, hex: null };
+    }
+    return { xml: null, hex: m[1] };
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(
+        function () {
+          api.toast("Copied", "success");
+        },
+        function () {
+          api.toast("Copy failed", "error");
+        }
+      );
+      return;
+    }
+    // http-on-LAN fallback
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand("copy");
+      api.toast("Copied", "success");
+    } catch (e) {
+      api.toast("Copy failed", "error");
+    }
+    document.body.removeChild(ta);
+  }
+
+  function payloadBlock(title, body, key, what) {
+    return (
+      '<div class="payload-block"><div class="payload-head"><span>' +
+      api.esc(title) +
+      '</span><button type="button" data-copy-key="' +
+      api.esc(key) +
+      '" data-copy-what="' +
+      what +
+      '">Copy</button></div><pre>' +
+      api.esc(body) +
+      "</pre></div>"
+    );
+  }
+
+  function payloadRowHtml(key, colspan) {
+    var p = payloadStore[key] || {};
+    var blocks = [];
+    if (p.xml) blocks.push(payloadBlock("Decoded splice XML", formatXml(p.xml), key, "xml"));
+    if (p.hex) blocks.push(payloadBlock("Raw section (hex)", formatHex(p.hex), key, "hex"));
+    if (!blocks.length) {
+      blocks.push(
+        '<div class="muted">' +
+          api.esc(
+            p.note ||
+              "No payload captured for this row (recorded before payload capture was deployed)."
+          ) +
+          "</div>"
+      );
+    }
+    return (
+      '<tr class="verify-payload"><td colspan="' +
+      colspan +
+      '">' +
+      blocks.join("") +
+      "</td></tr>"
+    );
+  }
+
+  function chevron(key) {
+    return (
+      '<span class="payload-chevron">' +
+      (expandedPayloads[key] ? "▾" : "▸") +
+      "</span> "
+    );
+  }
+
+  function bindPayloadClicks(el) {
+    el.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("button[data-copy-key]");
+      if (btn) {
+        ev.stopPropagation();
+        var p = payloadStore[btn.getAttribute("data-copy-key")] || {};
+        copyText(
+          btn.getAttribute("data-copy-what") === "xml"
+            ? p.xml || ""
+            : formatHex(p.hex || "")
+        );
+        return;
+      }
+      var tr = ev.target.closest("tr[data-payload-key]");
+      if (tr) {
+        var key = tr.getAttribute("data-payload-key");
+        if (expandedPayloads[key]) delete expandedPayloads[key];
+        else expandedPayloads[key] = true;
+        redrawTables();
+      }
+    });
+  }
+  // ------------------------------------------------------------------------
+
   function bindFocusRows(root) {
     if (!root) return;
     root.querySelectorAll("tr[data-event-id]").forEach(function (tr) {
@@ -258,12 +415,22 @@
             var testCue =
               String(e.detail || "").indexOf("verify auto-inject") >= 0 ||
               isTestCue(eventId);
-            return (
+            var key =
+              "s:" +
+              (e.id != null ? e.id : eventId + ":" + String(e.occurred_at || ""));
+            payloadStore[key] =
+              payloadFromDetail(e.detail) || {
+                note: "No payload recorded for this command (sent before payload capture was deployed).",
+              };
+            var html =
               '<tr class="' +
               rowClass.trim() +
+              '" data-payload-key="' +
+              api.esc(key) +
               '"' +
               (eventId ? ' data-event-id="' + api.esc(eventId) + '"' : "") +
               "><td>" +
+              chevron(key) +
               api.esc(ageLabel(ts)) +
               "</td><td>" +
               api.esc(eventId || "—") +
@@ -276,8 +443,9 @@
                 : '<span class="badge bad">' + api.esc(e.result || "?") + "</span>") +
               '</td><td class="clip muted">' +
               api.esc(e.processing_name || String(e.processing_channel_id || "—")) +
-              "</td></tr>"
-            );
+              "</td></tr>";
+            if (expandedPayloads[key]) html += payloadRowHtml(key, 5);
+            return html;
           })
           .join("") +
         "</tbody></table>";
@@ -300,6 +468,7 @@
             s.out_of_network == null ? null : !!Number(s.out_of_network),
           verified: !!Number(s.verified),
           raw_snip: s.raw_snip,
+          raw_hex: s.raw_hex,
         };
       });
     }
@@ -350,12 +519,20 @@
             var rowClass = matched ? " verify-matched" : "";
             var testCue = e.test_cue != null ? !!e.test_cue : isTestCue(eid);
             var repeats = Number(e.repeats || 1);
-            return (
+            var key = "r:" + (eid || "x") + ":" + String(e.ts || "");
+            payloadStore[key] = {
+              xml: e.raw_snip || null,
+              hex: e.raw_hex || null,
+            };
+            var html =
               '<tr class="' +
               rowClass.trim() +
+              '" data-payload-key="' +
+              api.esc(key) +
               '"' +
               (eid ? ' data-event-id="' + api.esc(eid) + '"' : "") +
               "><td>" +
+              chevron(key) +
               api.esc(ageLabel(e.last_ts || e.ts)) +
               "</td><td>" +
               api.esc(eid || "—") +
@@ -371,8 +548,9 @@
               (matched
                 ? '<span class="badge ok">sent</span>'
                 : '<span class="badge dim">—</span>') +
-              "</td></tr>"
-            );
+              "</td></tr>";
+            if (expandedPayloads[key]) html += payloadRowHtml(key, 5);
+            return html;
           })
           .join("") +
         "</tbody></table>";
@@ -705,6 +883,9 @@
     renderStatus(r.data && r.data.live);
     api.toast("Stopped", "success");
   });
+
+  bindPayloadClicks(document.getElementById("verify-injects"));
+  bindPayloadClicks(document.getElementById("verify-events"));
 
   loadEgresses();
   setInterval(loadInjects, 5000);
