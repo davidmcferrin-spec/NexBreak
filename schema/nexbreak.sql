@@ -162,7 +162,8 @@ CREATE TABLE scte_sightings (
     out_of_network          INTEGER,
     verified                BOOLEAN NOT NULL DEFAULT 0,
     source                  TEXT NOT NULL CHECK (source IN ('srt','feed')),
-    raw_snip                TEXT,
+    raw_snip                TEXT,               -- decoded splice table XML (full)
+    raw_hex                 TEXT,               -- raw section bytes as hex
     seen_at                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

@@ -123,12 +123,17 @@ def migrate(conn: sqlite3.Connection) -> None:
                 verified                BOOLEAN NOT NULL DEFAULT 0,
                 source                  TEXT NOT NULL CHECK (source IN ('srt','feed')),
                 raw_snip                TEXT,
+                raw_hex                 TEXT,
                 seen_at                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             CREATE INDEX idx_scte_sightings_egress ON scte_sightings(egress_channel_id, seen_at);
             CREATE INDEX idx_scte_sightings_proc ON scte_sightings(processing_channel_id, seen_at);
             """
         )
+        conn.commit()
+    scols = _column_names(conn, "scte_sightings")
+    if scols and "raw_hex" not in scols:
+        conn.execute("ALTER TABLE scte_sightings ADD COLUMN raw_hex TEXT")
         conn.commit()
 
     # Global SCTE trigger presets (Roll + panel URLs)

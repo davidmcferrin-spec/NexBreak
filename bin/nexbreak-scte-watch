@@ -55,6 +55,7 @@ _stop = False
 
 RECENT_MAX = 80
 SCTE_MARKER = "##scte##"
+SCTE_HEX_MARKER = "##sctehex##"
 
 # Verify test cues use event ids in this range (see _auto_inject_loop) so
 # they can be labeled in the UI and never confused with operator Rolls.
@@ -72,6 +73,21 @@ def is_test_cue(event_id: Any) -> bool:
         return TEST_CUE_EVENT_MIN <= int(event_id) <= TEST_CUE_EVENT_MAX
     except (TypeError, ValueError):
         return False
+
+
+def hex_section_event_id(hex_str: str) -> Optional[int]:
+    """
+    Best-effort splice_event_id from a raw SCTE-35 section hex dump
+    (TID 0xFC, command type 0x05 splice_insert at offset 13, event id next).
+    Used to sanity-check that a hex line pairs with the right XML line.
+    """
+    try:
+        raw = bytes.fromhex(re.sub(r"\s+", "", hex_str or ""))
+        if len(raw) >= 18 and raw[0] == 0xFC and raw[13] == 0x05:
+            return int.from_bytes(raw[14:18], "big")
+    except ValueError:
+        pass
+    return None
 
 
 def _handle(signum, _frame):
@@ -216,7 +232,8 @@ def parse_scte_xml(xml_text: str) -> Optional[dict[str, Any]]:
         "out_of_network": out_of_network,
         "cancel": cancel,
         "splice_type": splice_type,
-        "raw_snip": text[:240],
+        # Full decoded table XML — the Verify payload inspector shows it all.
+        "raw_snip": text,
     }
 
 
@@ -258,13 +275,14 @@ def insert_sighting(
     tap_kind: str,
     parsed: dict[str, Any],
     verified: bool,
+    raw_hex: Optional[str] = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO scte_sightings (
             egress_channel_id, processing_channel_id, event_id,
-            splice_type, out_of_network, verified, source, raw_snip
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            splice_type, out_of_network, verified, source, raw_snip, raw_hex
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             egress_id,
@@ -279,6 +297,7 @@ def insert_sighting(
             1 if verified else 0,
             tap_kind,
             parsed.get("raw_snip"),
+            raw_hex,
         ),
     )
     conn.commit()
@@ -315,6 +334,7 @@ def build_tsp_feed_argv(
         "--tid",
         "0xFC",
         f"--log-xml-line={SCTE_MARKER}",
+        f"--log-hexa-line={SCTE_HEX_MARKER}",
         "-P",
         "count",
         "--interval",
@@ -341,6 +361,7 @@ def build_tsp_srt_argv(tsp: str, *, caller: str) -> list[str]:
         "--tid",
         "0xFC",
         f"--log-xml-line={SCTE_MARKER}",
+        f"--log-hexa-line={SCTE_HEX_MARKER}",
         "-P",
         "count",
         "--interval",
@@ -509,7 +530,7 @@ def main() -> int:
             state["recent"] = list(recent)
             atomic_write_json(state_path, state)
 
-    def on_scte(xml_blob: str) -> None:
+    def on_scte(xml_blob: str, raw_hex: Optional[str] = None) -> None:
         parsed = parse_scte_xml(xml_blob)
         if not parsed:
             log.warning(
@@ -596,6 +617,7 @@ def main() -> int:
                     tap_kind=args.tap_kind,
                     parsed=parsed,
                     verified=verified,
+                    raw_hex=raw_hex,
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("sighting persist failed: %s", exc)
@@ -611,6 +633,7 @@ def main() -> int:
             "verified": verified,
             "test_cue": is_test_cue(parsed.get("event_id")),
             "raw_snip": parsed.get("raw_snip"),
+            "raw_hex": raw_hex,
         }
         with lock:
             recent.insert(0, entry)
@@ -718,6 +741,7 @@ def main() -> int:
                 "--tid",
                 "0xFC",
                 f"--log-xml-line={SCTE_MARKER}",
+                f"--log-hexa-line={SCTE_HEX_MARKER}",
                 "-O",
                 "drop",
             ]
