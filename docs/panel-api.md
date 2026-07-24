@@ -15,8 +15,30 @@ Loopback (from the host itself):
 http://127.0.0.1:8787
 ```
 
-There is **no API key required in this pass**. Restrict to trusted LAN. Audit
-rows still record source IP. Credential identity (`X-Api-Key`) is planned next.
+## API key (required for splice)
+
+Every `/v1/splice` call (GET or POST) must present a **12-character** panel key
+(`[A-Za-z0-9]`). Accept any one of:
+
+| Mechanism | Example |
+|---|---|
+| Query | `?key=Ab12Cd34Ef56` |
+| Header | `X-Api-Key: Ab12Cd34Ef56` |
+| Bearer | `Authorization: Bearer Ab12Cd34Ef56` |
+| JSON body | `{"key":"Ab12Cd34Ef56", …}` (POST) |
+
+Missing/invalid key → **HTTP 401**. Other control routes (config, presets,
+Verify) stay open on the trusted LAN; only splice fire is gated.
+
+The controller mints the key on first boot into `control_credentials` (hash +
+plaintext for panel URL copy) and writes a sidecar
+`panel-api.key` next to the SQLite DB. Manage it in **Triggers → Panel API
+key** (reveal / copy / rotate). Audit rows set `triggered_by_credential_id`.
+
+```http
+GET  /api/v1/credentials/panel          # reveal current key (LAN)
+POST /api/v1/credentials/panel/rotate   # requires current key; mints new
+```
 
 ---
 
@@ -30,14 +52,15 @@ Enabled presets become Roll buttons and panel URLs.
 **GET** (DNF USP3-16 / StreamDeck HTTP request actions that only GET):
 
 ```http
-GET /api/v1/splice?processing_channel_id=1&preset=roll
+GET /api/v1/splice?processing_channel_id=1&preset=roll&key=Ab12Cd34Ef56
 ```
 
-**POST** (JSON):
+**POST** (JSON + header):
 
 ```http
 POST /api/v1/splice
 Content-Type: application/json
+X-Api-Key: Ab12Cd34Ef56
 
 {"processing_channel_id": 1, "preset": "roll"}
 ```
@@ -49,6 +72,7 @@ Also accepted: `"preset_id": 1` instead of `"preset": "roll"`.
 ```http
 POST /api/v1/splice
 Content-Type: application/json
+X-Api-Key: Ab12Cd34Ef56
 
 {
   "processing_channel_id": 1,
@@ -101,9 +125,10 @@ extend this response wait.
 1. Create an **HTTP Request** action (or similar) per button.
 2. Method **GET**, URL from Triggers → Panel URL examples, e.g.
 
-   `http://sctetest/api/v1/splice?processing_channel_id=1&preset=roll`
+   `http://sctetest/api/v1/splice?processing_channel_id=1&preset=roll&key=Ab12Cd34Ef56`
 
 3. One button per channel × preset (Input 1 ROLL, Input 1 END, …).
+4. After **Rotate** on Triggers, re-copy every button URL.
 
 ---
 
@@ -116,9 +141,9 @@ Example mapping:
 
 | Button | URL |
 |---|---|
-| CH1 ROLL | `…/api/v1/splice?processing_channel_id=1&preset=roll` |
-| CH1 END | `…/api/v1/splice?processing_channel_id=1&preset=end` |
-| CH1 CANCEL | `…/api/v1/splice?processing_channel_id=1&preset=cancel` |
+| CH1 ROLL | `…/api/v1/splice?processing_channel_id=1&preset=roll&key=…` |
+| CH1 END | `…/api/v1/splice?processing_channel_id=1&preset=end&key=…` |
+| CH1 CANCEL | `…/api/v1/splice?processing_channel_id=1&preset=cancel&key=…` |
 
 ---
 
@@ -158,14 +183,21 @@ GET /api/v1/audit?event_type=splice_command&limit=20
 ## Curl smoke tests
 
 ```bash
+# Show / mint panel key
+KEY=$(curl -sS http://127.0.0.1:8787/v1/credentials/panel | python3 -c 'import sys,json; print(json.load(sys.stdin)["api_key"])')
+
 # List presets
 curl -sS http://127.0.0.1:8787/v1/splice/presets | python3 -m json.tool
 
-# Fire ROLL on channel 1 (GET)
-curl -sS 'http://127.0.0.1:8787/v1/splice?processing_channel_id=1&preset=roll'
+# Fire ROLL on channel 1 (GET + query key)
+curl -sS "http://127.0.0.1:8787/v1/splice?processing_channel_id=1&preset=roll&key=$KEY"
+
+# Same via header
+curl -sS -H "X-Api-Key: $KEY" \
+  'http://127.0.0.1:8787/v1/splice?processing_channel_id=1&preset=end'
 
 # Fire via Apache proxy
-curl -sS 'http://127.0.0.1/api/v1/splice?processing_channel_id=1&preset=end'
+curl -sS "http://127.0.0.1/api/v1/splice?processing_channel_id=1&preset=end&key=$KEY"
 
 # Recent splice audit
 curl -sS 'http://127.0.0.1:8787/v1/audit?event_type=splice_command&limit=10'

@@ -26,11 +26,14 @@ from nexbreak_db import (  # noqa: E402
     connect,
     control_sock_path,
     delete_splice_preset,
+    ensure_panel_credential,
     get_splice_preset,
     init_schema,
     list_splice_presets,
+    lookup_credential_by_key,
     migrate,
     preview_path_for,
+    rotate_panel_credential,
     row_to_dict,
     rows_to_dicts,
     upsert_splice_preset,
@@ -147,6 +150,7 @@ def _execute_splice(
     channel: dict[str, Any],
     fire: dict[str, Any],
     source_ip: str,
+    credential_id: Optional[int] = None,
 ) -> tuple[int, dict[str, Any]]:
     """Run splice against proc; audit; return (http_code, body)."""
     channel_id = int(channel["id"])
@@ -178,6 +182,7 @@ def _execute_splice(
             processing_channel_id=channel_id,
             splice_type=splice_type,
             splice_hex_payload=hex_payload,
+            triggered_by_credential_id=credential_id,
             source_ip=source_ip,
             result="failure",
             detail=f"{detail_prefix}proc socket missing: {sock}",
@@ -194,6 +199,7 @@ def _execute_splice(
             processing_channel_id=channel_id,
             splice_type=splice_type,
             splice_hex_payload=hex_payload,
+            triggered_by_credential_id=credential_id,
             source_ip=source_ip,
             result="failure",
             detail=f"{detail_prefix}{exc}",
@@ -207,6 +213,7 @@ def _execute_splice(
         processing_channel_id=channel_id,
         splice_type=splice_type,
         splice_hex_payload=hex_payload,
+        triggered_by_credential_id=credential_id,
         source_ip=source_ip,
         result="success" if ok else "failure",
         detail=detail_prefix + (result.get("detail") or result.get("error") or ""),
@@ -312,6 +319,45 @@ class Handler(BaseHTTPRequestHandler):
         if not raw:
             return {}
         return json.loads(raw.decode("utf-8"))
+
+    def _extract_api_key(
+        self,
+        qs: Optional[dict[str, list[str]]] = None,
+        body: Optional[dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Prefer X-Api-Key, then Bearer, then ?key= / JSON key (panel GET)."""
+        hdr = (self.headers.get("X-Api-Key") or self.headers.get("x-api-key") or "").strip()
+        if hdr:
+            return hdr
+        auth = (self.headers.get("Authorization") or "").strip()
+        if auth.lower().startswith("bearer "):
+            tok = auth[7:].strip()
+            if tok:
+                return tok
+        if qs:
+            vals = qs.get("key") or qs.get("api_key") or []
+            if vals and vals[0]:
+                return str(vals[0]).strip()
+        if body:
+            for k in ("key", "api_key"):
+                if body.get(k) not in (None, ""):
+                    return str(body[k]).strip()
+        return None
+
+    def _require_panel_key(
+        self,
+        conn,
+        *,
+        qs: Optional[dict[str, list[str]]] = None,
+        body: Optional[dict[str, Any]] = None,
+    ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+        key = self._extract_api_key(qs=qs, body=body)
+        if not key:
+            return None, "API key required (?key= or X-Api-Key header)"
+        cred = lookup_credential_by_key(conn, key)
+        if not cred:
+            return None, "invalid API key"
+        return cred, None
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         self._send(204, b"")
@@ -617,9 +663,29 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": True, "preset": preset})
                 return
 
+            if path == "/v1/credentials/panel":
+                migrate(conn)
+                cred = ensure_panel_credential(conn, db_path=DB_PATH)
+                self._send(
+                    200,
+                    {
+                        "ok": True,
+                        "id": cred["id"],
+                        "label": cred["label"],
+                        "api_key": cred["api_key"],
+                        "key_param": "key",
+                        "hint": "Use ?key=… on panel GET URLs or X-Api-Key header",
+                    },
+                )
+                return
+
             if path == "/v1/splice":
                 # Panel-friendly GET fire (DNF / StreamDeck).
                 migrate(conn)
+                cred, auth_err = self._require_panel_key(conn, qs=qs)
+                if auth_err:
+                    self._send(401, {"ok": False, "error": auth_err})
+                    return
                 body = {k: (v[0] if v else None) for k, v in qs.items()}
                 channel, fire, err = _resolve_splice_request(conn, body)
                 if err or not channel or not fire:
@@ -630,6 +696,7 @@ class Handler(BaseHTTPRequestHandler):
                     channel=channel,
                     fire=fire,
                     source_ip=self.client_address[0],
+                    credential_id=int(cred["id"]) if cred else None,
                 )
                 self._send(code, resp)
                 return
@@ -738,6 +805,11 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/v1/splice":
                 # Panel / Streamdeck / roll-button entry point.
                 migrate(conn)
+                qs = parse_qs(urlparse(self.path).query)
+                cred, auth_err = self._require_panel_key(conn, qs=qs, body=body)
+                if auth_err:
+                    self._send(401, {"ok": False, "error": auth_err})
+                    return
                 channel, fire, err = _resolve_splice_request(conn, body)
                 if err or not channel or not fire:
                     code = 404 if err and "not found" in err else 400
@@ -748,8 +820,38 @@ class Handler(BaseHTTPRequestHandler):
                     channel=channel,
                     fire=fire,
                     source_ip=self.client_address[0],
+                    credential_id=int(cred["id"]) if cred else None,
                 )
                 self._send(code, resp)
+                return
+
+            if path == "/v1/credentials/panel/rotate":
+                migrate(conn)
+                # Require the current key so random LAN clients can't rotate.
+                qs = parse_qs(urlparse(self.path).query)
+                old_cred, auth_err = self._require_panel_key(conn, qs=qs, body=body)
+                if auth_err:
+                    self._send(401, {"ok": False, "error": auth_err})
+                    return
+                cred = rotate_panel_credential(conn, db_path=DB_PATH)
+                audit(
+                    conn,
+                    event_type="config_change",
+                    source_ip=self.client_address[0],
+                    result="success",
+                    detail="panel API key rotated",
+                    triggered_by_credential_id=int(old_cred["id"]) if old_cred else None,
+                )
+                self._send(
+                    200,
+                    {
+                        "ok": True,
+                        "id": cred["id"],
+                        "label": cred["label"],
+                        "api_key": cred["api_key"],
+                        "message": "Panel API key rotated — update StreamDeck/DNF URLs",
+                    },
+                )
                 return
 
             if path == "/v1/splice/presets":
@@ -1345,6 +1447,9 @@ def main() -> int:
         migrate(conn)
     if args.seed or need_init:
         seed_demo(conn)
+    # Mint / load the 12-char panel key used by Roll + StreamDeck + DNF.
+    cred = ensure_panel_credential(conn, db_path=DB_PATH)
+    log.info("panel API key ready (id=%s label=%r)", cred["id"], cred["label"])
     conn.close()
 
     if args.init_only:

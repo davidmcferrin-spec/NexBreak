@@ -18,9 +18,22 @@ require __DIR__ . '/include/header.php';
 
 <p class="warn-banner">
   Enabled presets appear as buttons on Roll for every channel.
-  Panel URLs use <code>GET /api/v1/splice?processing_channel_id=N&amp;preset=slug</code>
-  — see <code>docs/panel-api.md</code>.
+  Panel URLs require <code>&amp;key=…</code> (12-char API key) — see <code>docs/panel-api.md</code>.
 </p>
+
+<section class="panel">
+  <h2>Panel API key</h2>
+  <p class="muted" style="margin-bottom:8px">
+    Required on every splice. Copy into StreamDeck/DNF URLs, or use header
+    <code>X-Api-Key</code>. Stored on the appliance (LAN trust).
+  </p>
+  <div class="bar" style="flex-wrap:wrap;align-items:center;gap:10px">
+    <code id="panel-key-display" class="muted">Loading…</code>
+    <button type="button" id="btn-copy-key">Copy key</button>
+    <button type="button" id="btn-reveal-key" title="Show / hide key">Reveal</button>
+    <button type="button" class="danger" id="btn-rotate-key" title="Invalidates old panel URLs">Rotate</button>
+  </div>
+</section>
 
 <section class="panel">
   <h2>Presets</h2>
@@ -75,7 +88,9 @@ require __DIR__ . '/include/header.php';
 
 <section class="panel">
   <h2>Panel URL examples</h2>
-  <p class="muted" style="margin-bottom:8px">Pick a channel — copy a GET URL onto a StreamDeck or DNF USP3-16 button.</p>
+  <p class="muted" style="margin-bottom:8px">
+    Pick a channel — copy a GET URL (includes <code>&amp;key=</code>) onto a StreamDeck or DNF USP3-16 button.
+  </p>
   <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
     Channel
     <select id="panel-channel" style="min-width:200px"></select>

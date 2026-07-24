@@ -2,21 +2,19 @@
 (function () {
   var api = window.NexBreakAPI;
   var whep = window.NexBreakWHEP;
-  var cc = window.NexBreakCC;
+  var vuApi = window.NexBreakVu;
   var grid = document.getElementById("roll-grid");
-  var btnCc = document.getElementById("btn-cc");
+  var btnVu = document.getElementById("btn-vu");
+  var btnMute = document.getElementById("btn-mute");
+  var volEl = document.getElementById("volume");
+  var volPct = document.getElementById("vol-pct");
+
   var players = [];
-  var ccClients = [];
-  var captionsOn = cc ? cc.getPref() : false;
-
+  var cards = []; // { ch, el, path, vu, video }
   var presets = [];
-
-  function syncCcButton() {
-    if (!btnCc) return;
-    btnCc.textContent = captionsOn ? "CC ON" : "CC";
-    btnCc.className = captionsOn ? "primary" : "";
-    btnCc.setAttribute("aria-pressed", captionsOn ? "true" : "false");
-  }
+  var listenPath = null; // which card's audio is armed (click to select)
+  var vuOn = vuApi ? vuApi.getVisiblePref() : true;
+  var userMuted = vuApi ? vuApi.getMutedPref() : true;
 
   function offsetLabel(raw) {
     var ms = Number(raw);
@@ -25,19 +23,69 @@
     return "Trigger held " + ms + " ms";
   }
 
+  function paintVuBtn() {
+    if (!btnVu) return;
+    btnVu.classList.toggle("active", vuOn);
+    btnVu.classList.toggle("primary", vuOn);
+    btnVu.setAttribute("aria-pressed", vuOn ? "true" : "false");
+  }
+
+  function paintMuteBtn() {
+    if (!btnMute) return;
+    var muted = userMuted || !listenPath;
+    btnMute.classList.toggle("active", muted);
+    btnMute.classList.toggle("primary", !muted);
+    btnMute.textContent = muted ? "Muted" : "Mute";
+    btnMute.setAttribute("aria-pressed", muted ? "true" : "false");
+  }
+
+  function paintVolume() {
+    if (!vuApi || !volEl) return;
+    var v = vuApi.getVolumePref();
+    volEl.value = String(Math.round(v * 100));
+    if (volPct) volPct.textContent = Math.round(v * 100) + "%";
+  }
+
+  function syncListen() {
+    cards.forEach(function (c) {
+      if (!c.vu) return;
+      var on = !userMuted && listenPath === c.path;
+      c.vu.setListen(on, { persist: false });
+      c.el.classList.toggle("listening", on);
+    });
+    paintMuteBtn();
+  }
+
+  function selectListen(path) {
+    if (!path) return;
+    if (listenPath === path && !userMuted) {
+      // Toggle mute when re-clicking the active card.
+      userMuted = true;
+      if (vuApi) vuApi.setMutedPref(true);
+    } else {
+      listenPath = path;
+      userMuted = false;
+      if (vuApi) vuApi.setMutedPref(false);
+      if (vuApi) vuApi.resume();
+    }
+    syncListen();
+  }
+
   function teardown() {
+    cards.forEach(function (c) {
+      if (c.vu) {
+        try {
+          c.vu.detach();
+        } catch (e) {}
+      }
+    });
+    cards = [];
     players.forEach(function (p) {
       try {
         p.disconnect();
       } catch (e) {}
     });
     players = [];
-    ccClients.forEach(function (c) {
-      try {
-        c.close();
-      } catch (e) {}
-    });
-    ccClients = [];
   }
 
   async function fire(channelId, preset, btn) {
@@ -121,7 +169,6 @@
         '<div class="preview-slot">' +
         (previewOn
           ? '<video playsinline autoplay muted></video>' +
-            '<div class="pane-cc" hidden aria-live="polite"></div>' +
             '<div class="preview-state muted">idle</div>'
           : '<div class="muted">Preview off</div>') +
         "</div>" +
@@ -129,12 +176,29 @@
         api.esc(offsetLabel(ch.splice_insertion_delay_ms)) +
         " · " +
         api.esc(path) +
+        (previewOn ? " · click card for audio" : "") +
         '</div><div class="bar"></div>';
+
+      var entry = { ch: ch, el: card, path: path, vu: null, video: null };
 
       if (previewOn) {
         var video = card.querySelector("video");
+        var slot = card.querySelector(".preview-slot");
         var stateEl = card.querySelector(".preview-state");
-        var ccEl = card.querySelector(".pane-cc");
+        entry.video = video;
+
+        if (vuApi && slot) {
+          entry.vu = vuApi.attach({
+            container: slot,
+            video: video,
+            listen: false,
+            layout: "stereo",
+            stereoOnly: true,
+            visible: vuOn,
+            volume: vuApi.getVolumePref(),
+          });
+        }
+
         var player = whep.create(video, {
           path: path,
           whepPort: whepPort,
@@ -144,23 +208,18 @@
               "preview-state " +
               (s.kind === "ok" ? "ok" : s.kind === "bad" ? "bad" : "muted");
           },
+          onStream: function (stream) {
+            if (entry.vu) entry.vu.setStream(stream, "stereo");
+          },
         });
         players.push(player);
         player.connect();
 
-        video.addEventListener("click", function () {
-          video.muted = !video.muted;
-          if (!video.muted) video.play().catch(function () {});
+        card.addEventListener("click", function (ev) {
+          if (ev.target.closest("button, select, input, .nexbreak-vu")) return;
+          selectListen(path);
         });
-        video.title = "Click to mute/unmute";
-
-        if (cc) {
-          var client = cc.connect(function (cue) {
-            cc.renderOverlay(ccEl, cue, captionsOn);
-          });
-          client.setPath(path);
-          ccClients.push(client);
-        }
+        video.title = "Click card to listen / mute";
       }
 
       var bar = card.querySelector(".bar");
@@ -213,40 +272,70 @@
       });
       bar.appendChild(asrBtn);
 
+      cards.push(entry);
       grid.appendChild(card);
     });
+
+    syncListen();
   }
 
-  if (btnCc && cc) {
-    syncCcButton();
-    btnCc.addEventListener("click", function () {
-      captionsOn = !captionsOn;
-      cc.setPref(captionsOn);
-      syncCcButton();
-      if (!captionsOn) {
-        grid.querySelectorAll(".pane-cc").forEach(function (el) {
-          cc.renderOverlay(el, { clear: true }, false);
-        });
-        return;
-      }
-      ccClients.forEach(function (client) {
-        var path = client.getPath();
-        if (!path) return;
-        fetch("/cc.php?path=" + encodeURIComponent(path) + "&once=1")
-          .then(function (r) {
-            return r.json();
-          })
-          .then(function (data) {
-            if (!data || !data.ok) return;
-            var card = grid.querySelector('.channel-card[data-path="' + path + '"]');
-            if (!card) return;
-            cc.renderOverlay(card.querySelector(".pane-cc"), data, true);
-          })
-          .catch(function () {});
+  if (btnVu && vuApi) {
+    paintVuBtn();
+    btnVu.addEventListener("click", function () {
+      vuOn = !vuOn;
+      vuApi.setVisiblePref(vuOn);
+      paintVuBtn();
+      cards.forEach(function (c) {
+        if (c.vu) c.vu.setVisible(vuOn);
       });
     });
   }
 
+  if (btnMute && vuApi) {
+    paintMuteBtn();
+    btnMute.addEventListener("click", function () {
+      if (!listenPath && cards.length) {
+        // First unmute: pick first preview card.
+        var first = cards.find(function (c) {
+          return c.vu;
+        });
+        if (first) listenPath = first.path;
+      }
+      userMuted = !userMuted;
+      vuApi.setMutedPref(userMuted);
+      if (!userMuted) vuApi.resume();
+      syncListen();
+    });
+  }
+
+  if (volEl && vuApi) {
+    paintVolume();
+    volEl.addEventListener("input", function () {
+      var v = (parseInt(volEl.value, 10) || 0) / 100;
+      vuApi.setVolumePref(v);
+      cards.forEach(function (c) {
+        if (c.vu) c.vu.setVolume(v);
+      });
+      paintVolume();
+      if (v > 0 && userMuted) {
+        userMuted = false;
+        vuApi.setMutedPref(false);
+        if (!listenPath) {
+          var first = cards.find(function (c) {
+            return c.vu;
+          });
+          if (first) listenPath = first.path;
+        }
+        vuApi.resume();
+        syncListen();
+      }
+      vuApi.resume();
+    });
+  }
+
   window.addEventListener("beforeunload", teardown);
+  paintVuBtn();
+  paintMuteBtn();
+  paintVolume();
   load();
 })();

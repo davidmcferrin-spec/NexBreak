@@ -4,6 +4,33 @@
   var presets = [];
   var channels = [];
   var editingId = null;
+  var panelKey = "";
+  var keyRevealed = false;
+
+  function paintPanelKey() {
+    var el = document.getElementById("panel-key-display");
+    var btn = document.getElementById("btn-reveal-key");
+    if (!el) return;
+    if (!panelKey) {
+      el.textContent = "Unavailable — is the controller running?";
+      el.className = "muted";
+      return;
+    }
+    el.textContent = keyRevealed ? panelKey : "••••••••••••";
+    el.className = keyRevealed ? "" : "muted";
+    if (btn) btn.textContent = keyRevealed ? "Hide" : "Reveal";
+  }
+
+  async function loadPanelKey() {
+    var res = await api.get("/v1/credentials/panel");
+    if (res.ok && res.data && res.data.ok && res.data.api_key) {
+      panelKey = String(res.data.api_key);
+      api.setApiKey(panelKey);
+    } else {
+      panelKey = "";
+    }
+    paintPanelKey();
+  }
 
   function listEl() {
     return document.getElementById("preset-list");
@@ -66,6 +93,11 @@
       box.innerHTML = '<div class="empty">Select a channel with enabled presets</div>';
       return;
     }
+    if (!panelKey) {
+      box.innerHTML =
+        '<div class="empty">Load the panel API key first (section above)</div>';
+      return;
+    }
     var origin = window.location.origin;
     box.innerHTML =
       '<table class="data"><thead><tr><th>Button</th><th>GET URL</th><th></th></tr></thead><tbody>' +
@@ -76,7 +108,9 @@
             "/api/v1/splice?processing_channel_id=" +
             cid +
             "&preset=" +
-            encodeURIComponent(p.slug);
+            encodeURIComponent(p.slug) +
+            "&key=" +
+            encodeURIComponent(panelKey);
           return (
             "<tr><td>" +
             api.esc(p.label) +
@@ -141,6 +175,7 @@
   }
 
   async function load() {
+    await loadPanelKey();
     var [pr, ch] = await Promise.all([
       api.get("/v1/splice/presets"),
       api.get("/v1/processing"),
@@ -172,6 +207,48 @@
       .join("");
     if (prev) sel.value = prev;
     renderPanelUrls();
+  }
+
+  var btnCopyKey = document.getElementById("btn-copy-key");
+  if (btnCopyKey) {
+    btnCopyKey.addEventListener("click", function () {
+      if (!panelKey) {
+        api.toast("No key loaded", "error");
+        return;
+      }
+      api.copyText(panelKey);
+    });
+  }
+  var btnReveal = document.getElementById("btn-reveal-key");
+  if (btnReveal) {
+    btnReveal.addEventListener("click", function () {
+      keyRevealed = !keyRevealed;
+      paintPanelKey();
+    });
+  }
+  var btnRotate = document.getElementById("btn-rotate-key");
+  if (btnRotate) {
+    btnRotate.addEventListener("click", async function () {
+      if (
+        !window.confirm(
+          "Rotate the panel API key? Existing StreamDeck/DNF URLs will stop working until you re-copy them."
+        )
+      ) {
+        return;
+      }
+      await api.ensureApiKey();
+      var res = await api.post("/v1/credentials/panel/rotate", {});
+      if (!res.ok || !res.data || !res.data.ok) {
+        api.toast((res.data && res.data.error) || "Rotate failed", "error");
+        return;
+      }
+      panelKey = String(res.data.api_key || "");
+      api.setApiKey(panelKey);
+      keyRevealed = true;
+      paintPanelKey();
+      renderPanelUrls();
+      api.toast("Panel API key rotated — update panel URLs", "success");
+    });
   }
 
   document.getElementById("btn-refresh").addEventListener("click", load);

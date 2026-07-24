@@ -108,8 +108,9 @@ restart specific systemd units. Giving `www-data` broad sudo rights to
 - `audit_events` — splice commands, service lifecycle events, config changes;
   always carries triggering identity, source IP, and result
 - `caption_lexicon` / `caption_blacklist` — shared across all channels
-- `control_credentials` — identity for API callers (panels, StreamDeck, web
-  sessions) — audit requires knowing *who*, not just *that*
+- `control_credentials` — 12-char panel API key (hash + plaintext for URL
+  copy; sidecar `panel-api.key` next to the DB). Required on `/v1/splice`
+  (`?key=` / `X-Api-Key` / Bearer). Audit sets `triggered_by_credential_id`.
 
 ## Stack and constraints
 
@@ -238,13 +239,17 @@ Done:
  ultra-low-delay flags), and after null-strip `-P pcrbitrate -P regulate`
  paces the local feed (`NEXBREAK_FEED_REGULATE=0` to disable). Egress
  ffmpeg paths no longer use `discardcorrupt`.
-- `web/` UI: Dashboard, Roll (with live preview + CC overlay + policy cycle), Preview,
+- `web/` UI: Dashboard, Roll (live WHEP + stereo VU / mute / volume from
+  NexVUE; caption policy cycle; former Preview page redirects here),
   Channels (processing + egress editors; Source dropdown routes input→egress;
   Copy URL for SRT listener / HLS M3U8; former Router page redirects here),
-  Captions, Verify, Services
-  (systemd/journal via allowlisted sudo wrappers — no controller), Metrics (host
-  CPU/mem/disk/uptime/GPU + audit-derived splice/config/routing activity), Audit;
-  `/api` PHP proxy to controller/verify
+  Captions, Verify, Services (systemd/journal via allowlisted sudo wrappers —
+  no controller), Metrics (host CPU/mem/disk/uptime/GPU + audit-derived
+  splice/config/routing activity), Audit; `/api` PHP proxy to controller/verify
+- Panel API key (2026-07-23): controller mints a 12-char key on boot;
+  `/v1/splice` requires it (query `key`, `X-Api-Key`, or Bearer). Triggers
+  page reveals/copies/rotates and embeds `&key=` in StreamDeck/DNF URLs;
+  Roll sends `X-Api-Key` via `nexbreak-api.js`. See `docs/panel-api.md`.
 
 Next:
 - Hardware bring-up of channel 1 against a real RTSP source

@@ -56,7 +56,7 @@ RTSP/SRT source  (ffmpeg client_pull, low-latency flags)
 Splice path:
 
 ```
-Web/panel → GET|POST /api/v1/splice?preset=roll&processing_channel_id=1
+Web/panel → GET|POST /api/v1/splice?preset=roll&processing_channel_id=1&key=…
          → controller (resolve preset → XML/hex)
          → Unix socket /run/nexbreak/proc-<id>.sock
          → if splice_insertion_delay_ms > 0: wait (hold trigger)
@@ -75,7 +75,7 @@ Configure presets in the web **Triggers** page.
 | Path | `nb{service_name}` (override via `preview_path`) |
 | WHEP | `http://<host>:8889/nb1/whep` |
 | Media | UDP/TCP **8189** |
-| UI | **Preview** page + embedded players on **Roll** |
+| UI | Embedded players on **Roll** (stereo VU + mute/volume) |
 
 ```bash
 sudo systemctl enable --now nexbreak-mediamtx
@@ -84,7 +84,7 @@ sudo ufw allow 8889/tcp comment 'NexBreak WHEP'
 sudo ufw allow 8189 comment 'NexBreak WebRTC media'
 ```
 
-Set a real RTSP URL on Channels → Input 1, restart `nexbreak-proc@1`, open Preview.
+Set a real RTSP URL on Channels → Input 1, restart `nexbreak-proc@1`, open Roll.
 
 ### Verify SCTE on the egress (return feed)
 
@@ -103,8 +103,9 @@ sightings table (and match recent audit commands when `event_id` aligns).
 
 ASR runs as an isolated worker (Vosk). While `effective_mode=asr_insert`,
 `nexbreak-cc-inject` runs **Live Caption Encoder** (`cc_injector`): UDP text →
-CEA-608 A/53 side data → libx264 `a53cc=1` → MPEG-TS into tsp. Preview **CC**
-is a separate UI overlay (`ccextractor`), not the program caption service.
+CEA-608 A/53 side data → libx264 `a53cc=1` → MPEG-TS into tsp. Roll’s
+CC Auto / Force ASR / Off button cycles this policy; stereo VU meters are
+browser-local confidence monitors (Web Audio), not the program path.
 
 ```bash
 # Set policy (may restart that channel's pipeline on mode flip):
@@ -125,7 +126,7 @@ sudo systemctl restart nexbreak-proc@1
 `vosk` sets `NEXBREAK_VOSK_MODEL` on `nexbreak-proc@*`. `cc-injector` builds
 the vendored Live Caption Encoder into `/usr/local/bin/cc_injector`. Without
 the binary, inject falls back to a caption-less remux (path stays up). Then set
-caption policy to **Force ASR**. Install `ccextractor` for Preview overlay.
+caption policy to **Force ASR**.
 
 ## Ubuntu bring-up
 

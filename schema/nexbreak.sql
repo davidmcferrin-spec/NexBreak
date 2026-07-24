@@ -102,8 +102,9 @@ CREATE TABLE routing_assignments (
 
 CREATE TABLE control_credentials (
     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-    label                   TEXT NOT NULL,             -- e.g. 'DNF panel - MCR', 'Streamdeck - Bay 2'
-    key_hash                TEXT NOT NULL,
+    label                   TEXT NOT NULL,             -- e.g. 'Panel / StreamDeck / DNF'
+    key_hash                TEXT NOT NULL,             -- sha256 hex of api_key
+    api_key                 TEXT,                      -- 12-char plaintext for panel URLs (LAN appliance)
     created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_used_at            TIMESTAMP,
     revoked                 BOOLEAN NOT NULL DEFAULT 0

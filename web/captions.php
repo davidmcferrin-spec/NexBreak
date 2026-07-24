@@ -8,7 +8,7 @@ require __DIR__ . '/include/header.php';
 <div class="page-header">
   <div>
     <h1>Captions</h1>
-    <p class="sub">Program CC policy (egress) · shared lexicon/blacklist · Preview overlay is separate</p>
+    <p class="sub">Program CC policy (egress) · shared lexicon/blacklist</p>
   </div>
   <button type="button" id="btn-refresh-channels">Refresh channels</button>
 </div>
@@ -21,7 +21,7 @@ require __DIR__ . '/include/header.php';
     <strong>Force ASR</strong> — always insert ASR (re-encodes that channel to H.264+A53; replaces source CC).
     <strong>Off</strong> — no ASR; source CC still preserved on remux.
     Policy changes that flip preserve ↔ insert restart that channel’s pipeline only.
-    Preview page <em>CC</em> toggle is a display-only overlay from ccextractor — not this ASR worker text.
+    Roll’s CC Auto / Force ASR / Off button cycles this policy per channel.
   </p>
   <div id="cap-channels"><div class="empty">Loading…</div></div>
 </section>

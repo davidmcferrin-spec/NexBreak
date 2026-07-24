@@ -3,14 +3,23 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import re
+import secrets
 import sqlite3
+import string
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 
 DEFAULT_DB = os.environ.get("NEXBREAK_DB", "/var/lib/nexbreak/nexbreak.sqlite")
+
+# Panel / StreamDeck / DNF shared API key (URL query or X-Api-Key).
+PANEL_API_KEY_LEN = 12
+PANEL_CREDENTIAL_LABEL = "Panel / StreamDeck / DNF"
+_PANEL_KEY_ALPHABET = string.ascii_letters + string.digits
 
 
 def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
@@ -135,6 +144,34 @@ def migrate(conn: sqlite3.Connection) -> None:
     if scols and "raw_hex" not in scols:
         conn.execute("ALTER TABLE scte_sightings ADD COLUMN raw_hex TEXT")
         conn.commit()
+
+    # Panel API credentials (12-char key for DNF / StreamDeck / Roll)
+    tables = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "control_credentials" not in tables:
+        conn.executescript(
+            """
+            CREATE TABLE control_credentials (
+                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                label                   TEXT NOT NULL,
+                key_hash                TEXT NOT NULL,
+                api_key                 TEXT,
+                created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_used_at            TIMESTAMP,
+                revoked                 BOOLEAN NOT NULL DEFAULT 0
+            );
+            """
+        )
+        conn.commit()
+    else:
+        ccols = _column_names(conn, "control_credentials")
+        if "api_key" not in ccols:
+            conn.execute("ALTER TABLE control_credentials ADD COLUMN api_key TEXT")
+            conn.commit()
 
     # Global SCTE trigger presets (Roll + panel URLs)
     tables = {
@@ -405,3 +442,142 @@ def audit(
     )
     conn.commit()
     return int(cur.lastrowid)
+
+
+def generate_panel_api_key(length: int = PANEL_API_KEY_LEN) -> str:
+    """URL-safe random key for panel GET URLs (?key=…)."""
+    n = max(8, int(length))
+    return "".join(secrets.choice(_PANEL_KEY_ALPHABET) for _ in range(n))
+
+
+def hash_api_key(key: str) -> str:
+    return hashlib.sha256(str(key).encode("utf-8")).hexdigest()
+
+
+def _write_panel_key_file(key: str, db_path: Optional[str] = None) -> None:
+    """Best-effort sidecar file for ops / PHP (same dir as the SQLite DB)."""
+    try:
+        db = Path(db_path or DEFAULT_DB)
+        path = db.parent / "panel-api.key"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(key).strip() + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o640)
+        except OSError:
+            pass
+    except OSError:
+        pass
+
+
+def ensure_panel_credential(
+    conn: sqlite3.Connection,
+    *,
+    db_path: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Ensure one active panel credential exists. Returns {id, label, api_key}.
+    Creates a new 12-char key when missing or when plaintext was never stored.
+    """
+    migrate(conn)
+    row = conn.execute(
+        """
+        SELECT * FROM control_credentials
+        WHERE revoked = 0
+        ORDER BY id ASC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is not None:
+        cred = row_to_dict(row) or {}
+        key = (cred.get("api_key") or "").strip()
+        if key and len(key) == PANEL_API_KEY_LEN:
+            _write_panel_key_file(key, db_path=db_path)
+            return {
+                "id": int(cred["id"]),
+                "label": cred.get("label") or PANEL_CREDENTIAL_LABEL,
+                "api_key": key,
+            }
+        # Legacy hash-only row — rotate so panel URLs can be shown again.
+        return rotate_panel_credential(conn, db_path=db_path, credential_id=int(cred["id"]))
+
+    key = generate_panel_api_key()
+    cur = conn.execute(
+        """
+        INSERT INTO control_credentials (label, key_hash, api_key, revoked)
+        VALUES (?, ?, ?, 0)
+        """,
+        (PANEL_CREDENTIAL_LABEL, hash_api_key(key), key),
+    )
+    conn.commit()
+    _write_panel_key_file(key, db_path=db_path)
+    return {
+        "id": int(cur.lastrowid),
+        "label": PANEL_CREDENTIAL_LABEL,
+        "api_key": key,
+    }
+
+
+def rotate_panel_credential(
+    conn: sqlite3.Connection,
+    *,
+    db_path: Optional[str] = None,
+    credential_id: Optional[int] = None,
+) -> dict[str, Any]:
+    """Revoke previous active keys and mint a new 12-char panel key."""
+    migrate(conn)
+    conn.execute("UPDATE control_credentials SET revoked = 1 WHERE revoked = 0")
+    key = generate_panel_api_key()
+    cur = conn.execute(
+        """
+        INSERT INTO control_credentials (label, key_hash, api_key, revoked)
+        VALUES (?, ?, ?, 0)
+        """,
+        (PANEL_CREDENTIAL_LABEL, hash_api_key(key), key),
+    )
+    conn.commit()
+    _write_panel_key_file(key, db_path=db_path)
+    return {
+        "id": int(cur.lastrowid),
+        "label": PANEL_CREDENTIAL_LABEL,
+        "api_key": key,
+    }
+
+
+def lookup_credential_by_key(
+    conn: sqlite3.Connection,
+    key: Optional[str],
+) -> Optional[dict[str, Any]]:
+    """Match a presented API key against active credentials (constant-time hash)."""
+    raw = (key or "").strip()
+    if not raw or len(raw) > 128:
+        return None
+    presented = hash_api_key(raw)
+    rows = conn.execute(
+        """
+        SELECT * FROM control_credentials
+        WHERE revoked = 0 AND key_hash IS NOT NULL
+        """
+    ).fetchall()
+    for row in rows:
+        stored = str(row["key_hash"] or "")
+        if stored and hmac.compare_digest(presented, stored):
+            cred = row_to_dict(row)
+            if cred is None:
+                return None
+            # Prefer DB plaintext; fall back to presented key for legacy rows.
+            if not (cred.get("api_key") or "").strip():
+                cred["api_key"] = raw
+            try:
+                conn.execute(
+                    """
+                    UPDATE control_credentials
+                    SET last_used_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (int(cred["id"]),),
+                )
+                conn.commit()
+            except sqlite3.Error:
+                pass
+            return cred
+    return None

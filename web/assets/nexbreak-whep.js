@@ -21,6 +21,7 @@
     var path = opts.path;
     var port = opts.whepPort || 8889;
     var onState = opts.onState || function () {};
+    var onStream = opts.onStream || function () {};
     var pc = null;
     var intentional = false;
     var reconnectTimer = null;
@@ -42,6 +43,9 @@
         pc = null;
       }
       if (videoEl) videoEl.srcObject = null;
+      try {
+        onStream(null, null);
+      } catch (e) {}
     }
 
     function scheduleReconnect(reason) {
@@ -86,6 +90,9 @@
           stream.addTrack(ev.track);
         }
         videoEl.play().catch(function () {});
+        try {
+          onStream(stream, ev.track);
+        } catch (e) {}
       };
       pc.onconnectionstatechange = function () {
         if (!pc) return;

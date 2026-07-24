@@ -399,33 +399,50 @@ table.asr-live td {
   max-width: 380px;
 }
 
+#roll-grid .channel-card.listening {
+  border-color: var(--acc);
+  box-shadow: 0 0 0 1px var(--acc);
+}
+
+.roll-audio-bar .tgl.active,
+.roll-audio-bar button.active {
+  background: var(--acc);
+  color: var(--on-acc);
+  border-color: var(--acc);
+  font-weight: 600;
+}
+
+.vol-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.vol-wrap .qlabel {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.vol-wrap input[type="range"] {
+  width: 100px;
+  padding: 0;
+  height: 6px;
+  accent-color: var(--acc);
+  cursor: pointer;
+  background: transparent;
+  border: none;
+}
+
+.vol-wrap #vol-pct {
+  min-width: 3em;
+  color: var(--dim);
+  font-size: 12px;
+}
+
 #roll-grid .preview-slot {
   width: 100%;
   max-width: 380px;
   aspect-ratio: 16 / 9;
-}
-
-/* Preview page: larger fixed 720×405 tiles */
-#preview-grid {
-  grid-template-columns: repeat(auto-fill, minmax(320px, 720px));
-  justify-content: start;
-}
-
-#preview-grid .channel-card {
-  max-width: min(720px, 100%);
-  width: 100%;
-}
-
-#preview-grid .preview-slot {
-  width: 100%;
-  max-width: 720px;
-  aspect-ratio: 16 / 9;
-}
-
-@media (max-width: 760px) {
-  #preview-grid {
-    grid-template-columns: 1fr;
-  }
 }
 
 .channel-card {
