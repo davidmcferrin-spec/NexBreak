@@ -11,10 +11,13 @@ RestartSec=2
 User=nexbreak
 Group=nexbreak
 # Shared /run/nexbreak with proc@ (control sockets). SCTE verify state lives
-# under nexbreak-verify, not this unit.
+# under nexbreak-verify, not this unit. Captions/ASR JSON live under
+# /var/lib/nexbreak (avoid RuntimeDirectory EROFS).
 RuntimeDirectory=nexbreak
 RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=yes
 Environment=NEXBREAK_RUN_DIR=/run/nexbreak
+Environment=NEXBREAK_DATA=/var/lib/nexbreak
 # Connect to /run/nexbreak/proc-*.sock (created by nexbreak-proc@ instances)
 ReadWritePaths=/var/lib/nexbreak /var/log/nexbreak /run/nexbreak
 NoNewPrivileges=true

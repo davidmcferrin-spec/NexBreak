@@ -413,6 +413,45 @@ def collect_config(dest: Path, hours: int) -> list[str]:
         ):
             schema_lines.append(row[0] + ";")
         write_text(dest / "schema.sql", "\n\n".join(schema_lines) + "\n")
+
+        # Host metric history (CPU/mem/swap/GPU) for the same window
+        try:
+            since = time.time() - float(hours) * 3600.0
+            samples = sqlite_rows(
+                conn,
+                """
+                SELECT sampled_at, cpu_percent, mem_percent, swap_percent,
+                       gpu_percent, load_1m, uptime_seconds
+                FROM host_metric_samples
+                WHERE sampled_at >= ?
+                ORDER BY sampled_at ASC
+                LIMIT 30000
+                """,
+                (since,),
+            )
+            write_json(dest / "host_metric_samples.json", samples)
+            write_text(
+                dest / "host_metric_samples.csv",
+                "sampled_at,cpu_percent,mem_percent,swap_percent,gpu_percent,load_1m,uptime_seconds\n"
+                + "\n".join(
+                    ",".join(
+                        str(r.get(k) if r.get(k) is not None else "")
+                        for k in (
+                            "sampled_at",
+                            "cpu_percent",
+                            "mem_percent",
+                            "swap_percent",
+                            "gpu_percent",
+                            "load_1m",
+                            "uptime_seconds",
+                        )
+                    )
+                    for r in samples
+                )
+                + ("\n" if samples else ""),
+            )
+        except sqlite3.Error as exc:
+            notes.append(f"host_metric_samples: {exc}")
     finally:
         conn.close()
 

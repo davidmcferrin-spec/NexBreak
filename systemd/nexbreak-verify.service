@@ -14,6 +14,7 @@ Group=nexbreak
 # helpers hit EROFS on RuntimeDirectory after ProtectSystem=strict).
 RuntimeDirectory=nexbreak
 RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=yes
 Environment=NEXBREAK_RUN_DIR=/run/nexbreak
 Environment=NEXBREAK_DATA=/var/lib/nexbreak
 Environment=NEXBREAK_SCTE_DIR=/var/lib/nexbreak/scte

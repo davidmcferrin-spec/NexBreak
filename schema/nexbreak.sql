@@ -200,3 +200,16 @@ INSERT INTO splice_presets (slug, label, sort_order, enabled, splice_type, auto_
   ('end_normal',   'End Normal',   50, 0, 'splice_end_normal',   0, NULL, 1),
   ('roll_30s',     'ROLL 30s auto-return', 60, 0, 'splice_start_immediate', 1, 30.0, 1);
 
+-- Host resource history (controller sampler; Metrics charts + support bundle)
+CREATE TABLE IF NOT EXISTS host_metric_samples (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    sampled_at      REAL NOT NULL,
+    cpu_percent     REAL,
+    mem_percent     REAL,
+    swap_percent    REAL,
+    gpu_percent     REAL,
+    load_1m         REAL,
+    uptime_seconds  REAL
+);
+CREATE INDEX IF NOT EXISTS idx_host_metric_samples_at ON host_metric_samples(sampled_at);
+

@@ -845,7 +845,77 @@ select.route-source {
 
 .list-edit .row span { flex: 1; }
 
-[data-tip] { cursor: help; border-bottom: 1px dotted var(--dim); }
+.route-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+tr.route-tinted td:first-child,
+.channel-card.route-tinted {
+  /* border set inline via NexBreakRouteColors */
+}
+
+table.data tr.route-tinted td {
+  background: transparent;
+}
+
+.route-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.host-uptime-foot {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--edge);
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.host-charts {
+  display: grid;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.host-chart-block h3 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--dim);
+  font-weight: 600;
+}
+
+.host-chart-canvas {
+  width: 100%;
+  height: 120px;
+  display: block;
+  background: var(--log-bg);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+}
+
+.about-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.about-stack a {
+  color: var(--acc);
+}
+
+.about-meta {
+  font-size: 12px;
+  color: var(--dim);
+  margin-top: 8px;
+}
 
 /* Services (NexVUE-style ops) */
 .support-bundle-bar {
@@ -1173,4 +1243,67 @@ tr.verify-payload pre {
   .verify-col {
     height: min(42vh, 360px);
   }
+}
+
+.route-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+.route-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.host-uptime-foot {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--edge);
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.host-charts {
+  display: grid;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.host-chart-block h3 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--dim);
+  font-weight: 600;
+}
+
+.host-chart-canvas {
+  width: 100%;
+  height: 120px;
+  display: block;
+  background: var(--log-bg);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+}
+
+.about-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.about-stack a {
+  color: var(--acc);
+}
+
+.about-meta {
+  font-size: 12px;
+  color: var(--dim);
+  margin-top: 8px;
 }

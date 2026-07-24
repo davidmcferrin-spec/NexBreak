@@ -26,7 +26,7 @@ Env overrides: NEXBREAK_PREFIX NEXBREAK_DATA NEXBREAK_LOG
                NEXBREAK_TIMEZONE (default America/New_York)
                NEXBREAK_VOSK_MODEL_DIR  (default /opt/vosk)
                NEXBREAK_VOSK_MODEL_NAME (default vosk-model-small-en-us-0.15)
-               NEXBREAK_SRT_LATENCY_MS  (egress SRT latency; default 800)
+               NEXBREAK_SRT_LATENCY_MS  (ingest/egress SRT latency; default 1200)
 EOF
 }
 
@@ -165,12 +165,14 @@ cmd_deps() {
 
 cmd_install() {
   id -u nexbreak &>/dev/null || useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin nexbreak
-  mkdir -p "$PREFIX" "$DATA" "$LOG" "$DATA/scte" "$DATA/hls" /run/nexbreak
+  mkdir -p "$PREFIX" "$DATA" "$LOG" "$DATA/scte" "$DATA/hls" "$DATA/captions" "$DATA/asr" /run/nexbreak
   rsync -a --delete \
     --exclude '.git' --exclude 'data/*.sqlite' --exclude '__pycache__' \
     "$ROOT"/ "$PREFIX"/
   chown -R nexbreak:nexbreak "$DATA" "$LOG" /run/nexbreak
-  chmod 2755 "$DATA/hls" || chmod 0755 "$DATA/hls" || true
+  # www-data (group nexbreak) reads HLS + caption overlay JSON.
+  chmod 2755 "$DATA/hls" "$DATA/captions" "$DATA/asr" 2>/dev/null \
+    || chmod 0755 "$DATA/hls" "$DATA/captions" "$DATA/asr" || true
   # www-data needs to reach the controller HTTP port only (loopback)
   # and read HLS origin files (group nexbreak).
   usermod -aG nexbreak www-data || true
@@ -197,6 +199,9 @@ cmd_install() {
   for s in nexbreak-ops-status.sh nexbreak-ops-journal.sh nexbreak-ops-journal-clear.sh nexbreak-ops-restart.sh nexbreak-ops-enable.sh nexbreak-ops-support-bundle.sh; do
     install -m 755 "$PREFIX/scripts/ops/$s" "/usr/local/bin/$s"
   done
+  if [[ -f "$PREFIX/scripts/ops/nexbreak-bakein-watch.sh" ]]; then
+    chmod 755 "$PREFIX/scripts/ops/nexbreak-bakein-watch.sh"
+  fi
   # Support bundle collector (invoked by the ops wrapper above).
   if [[ -f "$PREFIX/bin/nexbreak-support-bundle" ]]; then
     chmod 755 "$PREFIX/bin/nexbreak-support-bundle"

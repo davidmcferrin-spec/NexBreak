@@ -23,6 +23,8 @@ SendSIGKILL=yes
 # Same isolation model as nexbreak-proc@ — reads whatever local feed the
 # router currently assigns it. Restarting an egress instance to change its
 # destination does not touch the processing service producing its feed.
+Environment=NEXBREAK_DATA=/var/lib/nexbreak
+Environment=NEXBREAK_SRT_LATENCY_MS=1200
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

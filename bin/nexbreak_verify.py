@@ -27,9 +27,54 @@ def data_dir() -> Path:
 
 
 def ensure_run_subdir(name: str) -> Path:
-    """Create /run/nexbreak/<name> when writable; raise OSError if not."""
+    """
+    Create /run/nexbreak/<name> when writable.
+
+    Under ProtectSystem=strict + shared RuntimeDirectory, mkdir can raise
+    OSError (EROFS) after a sibling unit recycles the mount. Callers should
+    prefer durable data_dir paths for long-lived state (captions, asr, scte).
+    """
     d = run_dir() / name
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Retry once after ensuring parent exists (RuntimeDirectory recreate).
+        try:
+            run_dir().mkdir(parents=True, exist_ok=True)
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            raise
+    return d
+
+
+def ensure_data_subdir(name: str, *, mode: int = 0o775) -> Path:
+    """Create /var/lib/nexbreak/<name> (always on ReadWritePaths)."""
+    d = data_dir() / name
     d.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(d, mode)
+    except OSError:
+        pass
+    return d
+
+
+def captions_dir(*, create: bool = False) -> Path:
+    """
+    CC overlay JSON for web/cc.php (nexbreak-cc-watch).
+
+    Lives under /var/lib/nexbreak/captions — NOT RuntimeDirectory /run/nexbreak.
+    Shared RuntimeDirectory + ProtectSystem=strict previously caused
+    OSError: Read-only file system: '/run/nexbreak/captions' when a unit
+    recycled. Override: NEXBREAK_CAPTIONS_DIR.
+    """
+    override = (os.environ.get("NEXBREAK_CAPTIONS_DIR") or "").strip()
+    d = Path(override) if override else (data_dir() / "captions")
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(d, 0o775)
+        except OSError:
+            pass
     return d
 
 
@@ -50,9 +95,21 @@ def scte_dir(*, create: bool = False) -> Path:
 
 
 def asr_dir(*, create: bool = False) -> Path:
+    """
+    Live ASR status JSON for Roll/status.
+
+    Under /var/lib/nexbreak/asr (same EROFS rationale as captions/scte).
+    Override: NEXBREAK_ASR_DIR.
+    """
+    override = (os.environ.get("NEXBREAK_ASR_DIR") or "").strip()
+    d = Path(override) if override else (data_dir() / "asr")
     if create:
-        return ensure_run_subdir("asr")
-    return run_dir() / "asr"
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(d, 0o775)
+        except OSError:
+            pass
+    return d
 
 
 def scte_state_path(egress_id: int) -> Path:
@@ -64,7 +121,7 @@ def scte_pid_path(egress_id: int) -> Path:
 
 
 def asr_state_path(service_name: str) -> Path:
-    return run_dir() / "asr" / f"{service_name}.json"
+    return asr_dir(create=True) / f"{service_name}.json"
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:

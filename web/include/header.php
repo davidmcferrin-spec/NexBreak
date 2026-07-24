@@ -21,6 +21,7 @@ $nav = [
     'services' => ['href' => '/services.php', 'label' => 'Services'],
     'metrics' => ['href' => '/metrics.php', 'label' => 'Metrics'],
     'audit' => ['href' => '/audit.php', 'label' => 'Audit'],
+    'about' => ['href' => '/about.php', 'label' => 'About'],
 ];
 ?><!DOCTYPE html>
 <html lang="en">
@@ -36,6 +37,7 @@ window.NEXBREAK_API = '/api';
 window.NEXBREAK_WHEP_PORT = 8889;
 </script>
 <script src="<?= htmlspecialchars(nexbreak_asset('/assets/nexbreak-api.js'), ENT_QUOTES, 'UTF-8') ?>"></script>
+<script src="<?= htmlspecialchars(nexbreak_asset('/assets/nexbreak-route-colors.js'), ENT_QUOTES, 'UTF-8') ?>"></script>
 <script src="<?= htmlspecialchars(nexbreak_asset('/assets/nexbreak-whep.js'), ENT_QUOTES, 'UTF-8') ?>"></script>
 <script src="<?= htmlspecialchars(nexbreak_asset('/assets/nexbreak-vu.js'), ENT_QUOTES, 'UTF-8') ?>"></script>
 <script src="<?= htmlspecialchars(nexbreak_asset('/assets/nexbreak-cc.js'), ENT_QUOTES, 'UTF-8') ?>"></script>

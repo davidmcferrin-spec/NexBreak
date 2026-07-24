@@ -14,7 +14,15 @@ User=nexbreak
 Group=nexbreak
 RuntimeDirectory=nexbreak
 RuntimeDirectoryMode=0770
+# Keep /run/nexbreak across restarts so sibling units (controller/verify/proc@)
+# do not remount the shared RuntimeDirectory read-only mid-flight.
+RuntimeDirectoryPreserve=yes
 Environment=NEXBREAK_RUN_DIR=/run/nexbreak
+Environment=NEXBREAK_DATA=/var/lib/nexbreak
+Environment=NEXBREAK_CAPTIONS_DIR=/var/lib/nexbreak/captions
+Environment=NEXBREAK_ASR_DIR=/var/lib/nexbreak/asr
+# Default SRT latency/buffers (override via drop-in). 1200ms + 8MiB rcvbuf.
+Environment=NEXBREAK_SRT_LATENCY_MS=1200
 TimeoutStopSec=10
 KillMode=control-group
 KillSignal=SIGTERM

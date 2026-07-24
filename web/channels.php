@@ -13,6 +13,12 @@ require __DIR__ . '/include/header.php';
   <button type="button" id="btn-refresh">Refresh</button>
 </div>
 
+<p class="warn-banner">
+  Source on an egress picks which processing feed it reads. Changes apply within ~1s
+  (egress rebuilds the push automatically — no unit restart). Matching colors link
+  each input to the outputs it feeds.
+</p>
+
 <section class="two-col">
   <div class="panel">
     <div class="panel-head">

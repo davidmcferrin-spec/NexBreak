@@ -50,6 +50,11 @@ from nexbreak_control import (  # noqa: E402
     send_splice,
 )
 from nexbreak_host import host_snapshot  # noqa: E402
+from nexbreak_metrics import (  # noqa: E402
+    ensure_host_samples_table,
+    query_host_samples,
+    start_host_sampler,
+)
 
 
 log = logging.getLogger("nexbreak-controller")
@@ -498,20 +503,22 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/v1/metrics":
-                # Operational metrics from audit_events + live host snapshot.
+                # Operational metrics from audit_events + host sample history.
                 range_key = (qs.get("range") or ["24h"])[0]
                 ranges = {
                     "15m": (15 * 60, 60),
+                    "30m": (30 * 60, 120),
                     "1h": (3600, 300),
                     "6h": (6 * 3600, 900),
                     "24h": (86400, 3600),
-                    "7d": (7 * 86400, 6 * 3600),
+                    "72h": (72 * 3600, 3 * 3600),
                 }
                 if range_key not in ranges:
                     self._send(400, {"ok": False, "error": "invalid range"})
                     return
                 span_s, bucket_s = ranges[range_key]
                 since_expr = f"-{span_s} seconds"
+                ensure_host_samples_table(conn)
                 # Bucket labels via unixepoch flooring (SQLite 3.38+ / Ubuntu 24).
                 rows = conn.execute(
                     """
@@ -560,7 +567,7 @@ class Handler(BaseHTTPRequestHandler):
                     (since_expr,),
                 ).fetchone()
                 proc = conn.execute(
-                    "SELECT id, name, enabled, input_type, captioning_enabled FROM processing_channels ORDER BY id"
+                    "SELECT id, name, enabled, input_type, captioning_enabled, caption_policy, service_name FROM processing_channels ORDER BY id"
                 ).fetchall()
                 egr = conn.execute(
                     "SELECT id, name, enabled, output_type, srt_mode FROM egress_channels ORDER BY id"
@@ -572,9 +579,10 @@ class Handler(BaseHTTPRequestHandler):
                     FROM routing_assignments ra
                     JOIN processing_channels pc ON pc.id = ra.processing_channel_id
                     JOIN egress_channels ec ON ec.id = ra.egress_channel_id
-                    ORDER BY ec.id
+                    ORDER BY ra.processing_channel_id, ec.id
                     """
                 ).fetchall()
+                host_series = query_host_samples(conn, since_seconds=float(span_s))
                 self._send(
                     200,
                     {
@@ -591,6 +599,8 @@ class Handler(BaseHTTPRequestHandler):
                             "routes": rows_to_dicts(routes),
                         },
                         "host": host_snapshot(),
+                        "host_series": host_series,
+                        "host_sample_interval_s": 15,
                     },
                 )
                 return
@@ -930,7 +940,16 @@ class Handler(BaseHTTPRequestHandler):
                     result="success",
                     detail=f"egress {egr_id} ← processing {proc_id}",
                 )
-                self._send(200, {"ok": True})
+                # Egress watches routing_assignments and rebuilds the push
+                # within ~1s — no systemd restart required.
+                self._send(
+                    200,
+                    {
+                        "ok": True,
+                        "hot_apply": True,
+                        "message": "Routing saved — egress switches within ~1s",
+                    },
+                )
                 return
 
             if path == "/v1/audit/clear":
@@ -1450,12 +1469,14 @@ def main() -> int:
     # Mint / load the 12-char panel key used by Roll + StreamDeck + DNF.
     cred = ensure_panel_credential(conn, db_path=DB_PATH)
     log.info("panel API key ready (id=%s label=%r)", cred["id"], cred["label"])
+    ensure_host_samples_table(conn)
     conn.close()
 
     if args.init_only:
         log.info("init-only complete")
         return 0
 
+    start_host_sampler(DB_PATH)
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     log.info("listening on http://%s:%s  db=%s", args.host, args.port, DB_PATH or "default")
     try:

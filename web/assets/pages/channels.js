@@ -1,6 +1,7 @@
 "use strict";
 (function () {
   var api = window.NexBreakAPI;
+  var colors = window.NexBreakRouteColors;
   var procModal = document.getElementById("proc-modal");
   var egrModal = document.getElementById("egr-modal");
   var tipEl = document.getElementById("field-tip");
@@ -290,7 +291,12 @@
       return false;
     }
     assignments[eid] = pid;
-    if (!quiet) api.toast((label || "Egress") + " ← reassigned", "success");
+    if (!quiet) {
+      api.toast(
+        (label || "Egress") + " ← reassigned (applies within ~1s)",
+        "success"
+      );
+    }
     return true;
   }
 
@@ -381,9 +387,18 @@
               '" title="Processing input that feeds this egress"></select></td>';
           }
           return (
-            "<tr><td>" +
+            '<tr class="route-tinted" data-pid="' +
+            (kind === "proc"
+              ? api.esc(String(c.id))
+              : api.esc(String(assignments[c.id] || ""))) +
+            '"><td>' +
             statusBadge(kind, c) +
             "</td><td>" +
+            (kind === "proc" && colors
+              ? colors.swatchHtml(c.id, c.name)
+              : kind === "egr" && colors && assignments[c.id]
+                ? colors.swatchHtml(assignments[c.id])
+                : "") +
             api.esc(c.name) +
             (Number(c.enabled) ? "" : ' <span class="badge dim">cfg off</span>') +
             extras +
@@ -414,6 +429,7 @@
           });
           var ok = await applyRouting(eid, sel.value, egr ? egr.name : "Egress");
           if (!ok) fillSourceSelect(sel, eid);
+          else renderList(document.getElementById("egr-list"), lastEgr, "egr");
         });
       });
     }
@@ -431,6 +447,12 @@
         api.copyText(btn.getAttribute("data-copy-url"));
       });
     });
+    if (colors) {
+      el.querySelectorAll("tr.route-tinted").forEach(function (tr) {
+        var pid = tr.getAttribute("data-pid");
+        if (pid) colors.paintRow(tr, pid);
+      });
+    }
   }
 
   function updateProcSummary() {
@@ -815,7 +837,12 @@
       var routed = await applyRouting(id, sourceId, body.name || "Egress", true);
       if (!routed) return;
     }
-    api.toast("Egress saved — restart nexbreak-egress@" + id, "success");
+    api.toast(
+      "Egress saved" +
+        (sourceId ? " · routing applies within ~1s" : "") +
+        " — restart unit if transport settings changed",
+      "success"
+    );
     closeModal(egrModal);
     load();
   });

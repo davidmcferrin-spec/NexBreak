@@ -255,7 +255,21 @@ Done:
 - Support bundle (2026-07-24): Services one-click zip via
   `nexbreak-ops-support-bundle.sh` → `bin/nexbreak-support-bundle` (journals,
   systemd status, redacted channel/routing/presets/audit, `/run/nexbreak`
-  state, host/versions). Secrets stripped; safe for bake-in hand-off.
+  state, host/versions, host metric samples). Secrets stripped; safe for
+  bake-in hand-off.
+- Metrics history + routing UX (2026-07-24): controller samples CPU/mem/swap/GPU
+  every 15s into `host_metric_samples` (72h retain); Metrics page line charts
+  for 15m–72h; uptime footer-only; disk not logged. Routing snapshot
+  Processing→Egress with shared color accents on Channels. Egress hot-applies
+  routing changes (~1s rebuild). About page lists stack/OSS components.
+- Pipeline stability (2026-07-24): ingest/egress SRT default latency 1200ms +
+  8MiB rcvbuf/sndbuf + peeridletimeout (env `NEXBREAK_SRT_*`); ingest stderr
+  watch recycles on libsrt overflow; local-feed video watchdog + in-process
+  pipeline recycle (no systemd exit loop); preview optional maps + backoff
+  when feed empty. Captions/ASR overlay JSON moved to
+  `/var/lib/nexbreak/captions` + `/var/lib/nexbreak/asr` (fixes EROFS on
+  `/run/nexbreak/captions`); `RuntimeDirectoryPreserve=yes` on shared units.
+  Bake-in helper: `scripts/ops/nexbreak-bakein-watch.sh`.
 
 Next:
 - Hardware bring-up of channel 1 against a real RTSP source

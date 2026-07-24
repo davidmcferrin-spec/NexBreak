@@ -2,8 +2,9 @@
 /**
  * Same-origin SSE for closed-caption cues (NexVUE pattern).
  *
- * State files: /run/nexbreak/captions/<preview_path>.json
+ * State files: /var/lib/nexbreak/captions/<preview_path>.json
  * written by nexbreak-cc-watch (ccextractor → text).
+ * (Formerly /run/nexbreak/captions — EROFS under ProtectSystem=strict.)
  *
  *   GET /cc.php?path=nb1         → text/event-stream
  *   GET /cc.php?path=nb1&once=1  → application/json snapshot
@@ -16,7 +17,7 @@ function cc_state_dir(): string
     if (is_string($env) && $env !== '') {
         return rtrim($env, "/\\");
     }
-    return '/run/nexbreak/captions';
+    return '/var/lib/nexbreak/captions';
 }
 
 function cc_normalize_path(?string $path): ?string

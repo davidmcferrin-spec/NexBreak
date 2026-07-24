@@ -1,23 +1,11 @@
 "use strict";
 (function () {
   var api = window.NexBreakAPI;
+  var colors = window.NexBreakRouteColors;
   var range = "24h";
 
   function n(v) {
     return v == null || v === "" ? 0 : Number(v);
-  }
-
-  function fmtBytes(bytes) {
-    var b = Number(bytes);
-    if (!isFinite(b) || b < 0) return "—";
-    var units = ["B", "KiB", "MiB", "GiB", "TiB"];
-    var i = 0;
-    while (b >= 1024 && i < units.length - 1) {
-      b /= 1024;
-      i++;
-    }
-    var digits = i === 0 ? 0 : b >= 100 ? 0 : b >= 10 ? 1 : 2;
-    return b.toFixed(digits) + " " + units[i];
   }
 
   function fmtUptime(sec) {
@@ -31,110 +19,115 @@
     return m + "m";
   }
 
-  function setMeter(id, pct) {
-    var el = document.getElementById(id);
-    if (!el) return;
-    if (pct == null || !isFinite(pct)) {
-      el.hidden = true;
-      return;
+  function cssVar(name, fallback) {
+    try {
+      var v = getComputedStyle(document.documentElement).getPropertyValue(name);
+      return (v && v.trim()) || fallback;
+    } catch (e) {
+      return fallback;
     }
-    var fill = el.querySelector(".meter-fill");
-    var p = Math.max(0, Math.min(100, Number(pct)));
-    el.hidden = false;
-    el.classList.toggle("warn", p >= 75 && p < 90);
-    el.classList.toggle("bad", p >= 90);
-    if (fill) fill.style.width = p.toFixed(1) + "%";
   }
 
-  function renderHost(host) {
-    var meta = document.getElementById("host-meta");
-    var gpuEl = document.getElementById("host-gpu");
-    if (!host || host.available === false) {
-      meta.textContent =
-        (host && host.error) || "Host metrics unavailable (controller not on Linux?)";
-      ["h-cpu", "h-load", "h-mem", "h-swap", "h-disk", "h-uptime"].forEach(function (id) {
-        document.getElementById(id).textContent = "—";
+  function drawLineChart(canvas, series, key, stroke) {
+    if (!canvas) return;
+    var dpr = window.devicePixelRatio || 1;
+    var cssW = canvas.clientWidth || 800;
+    var cssH = canvas.clientHeight || 120;
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    var ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    var edge = cssVar("--edge", "#2c3542");
+    var dim = cssVar("--dim", "#98a6b5");
+    ctx.strokeStyle = edge;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(36, 8);
+    ctx.lineTo(36, cssH - 18);
+    ctx.lineTo(cssW - 8, cssH - 18);
+    ctx.stroke();
+
+    var pts = (series || [])
+      .map(function (row) {
+        var y = row[key];
+        if (y == null || y === "") return null;
+        return { t: Number(row.sampled_at), y: Number(y) };
+      })
+      .filter(function (p) {
+        return p && isFinite(p.t) && isFinite(p.y);
       });
-      ["h-cpu-meter", "h-mem-meter", "h-swap-meter", "h-disk-meter"].forEach(function (id) {
-        setMeter(id, null);
-      });
-      gpuEl.hidden = true;
-      gpuEl.innerHTML = "";
+
+    if (!pts.length) {
+      ctx.fillStyle = dim;
+      ctx.font = "12px ui-monospace, monospace";
+      ctx.fillText("No samples yet — waiting for controller sampler", 44, cssH / 2);
       return;
     }
 
-    var cpu = host.cpu || {};
-    var load = host.loadavg || {};
-    var mem = host.memory || {};
-    var disk = host.disk || {};
-    var cores = n(cpu.count);
-    var cpuPct = cpu.percent;
-    var cpuLabel =
-      cpuPct == null || cpuPct === ""
-        ? cores
-          ? cores + " cores"
-          : "—"
-        : Number(cpuPct).toFixed(1) + "%" + (cores ? " · " + cores + " cores" : "");
-    document.getElementById("h-cpu").textContent = cpuLabel;
-    setMeter("h-cpu-meter", cpuPct);
+    var t0 = pts[0].t;
+    var t1 = pts[pts.length - 1].t;
+    if (t1 <= t0) t1 = t0 + 1;
+    var yMin = 0;
+    var yMax = 100;
+    var padL = 36;
+    var padR = 8;
+    var padT = 8;
+    var padB = 18;
+    var w = cssW - padL - padR;
+    var h = cssH - padT - padB;
 
-    if (load["1m"] != null) {
-      document.getElementById("h-load").textContent =
-        load["1m"] + " / " + load["5m"] + " / " + load["15m"];
-    } else {
-      document.getElementById("h-load").textContent = "—";
+    ctx.fillStyle = dim;
+    ctx.font = "10px ui-monospace, monospace";
+    ctx.fillText("100", 4, padT + 8);
+    ctx.fillText("0", 10, padT + h);
+
+    ctx.strokeStyle = stroke || cssVar("--acc", "#56c4f5");
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    pts.forEach(function (p, i) {
+      var x = padL + ((p.t - t0) / (t1 - t0)) * w;
+      var y = padT + h - ((p.y - yMin) / (yMax - yMin)) * h;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    var last = pts[pts.length - 1];
+    ctx.fillStyle = stroke || cssVar("--acc", "#56c4f5");
+    ctx.font = "11px ui-monospace, monospace";
+    ctx.fillText(last.y.toFixed(1) + "%", cssW - 64, 16);
+  }
+
+  function renderHostCharts(series, host) {
+    drawLineChart(document.getElementById("chart-cpu"), series, "cpu_percent", cssVar("--acc", "#56c4f5"));
+    drawLineChart(document.getElementById("chart-mem"), series, "mem_percent", cssVar("--ok", "#4cc38a"));
+    drawLineChart(document.getElementById("chart-swap"), series, "swap_percent", cssVar("--warn", "#f5a623"));
+    drawLineChart(document.getElementById("chart-gpu"), series, "gpu_percent", "#e87a7a");
+
+    var foot = document.getElementById("host-uptime-foot");
+    var meta = document.getElementById("host-meta");
+    var nSamples = (series || []).length;
+    if (meta) {
+      var bits = [];
+      if (host && host.hostname) bits.push(host.hostname);
+      bits.push(nSamples + " samples");
+      bits.push("15s interval");
+      meta.textContent = bits.join(" · ");
+    }
+    if (foot) {
+      var up =
+        host && host.uptime_seconds != null
+          ? fmtUptime(host.uptime_seconds)
+          : "—";
+      foot.textContent = "Uptime " + up + " · disk not charted";
     }
 
-    if (mem.total_bytes) {
-      document.getElementById("h-mem").textContent =
-        fmtBytes(mem.used_bytes) +
-        " / " +
-        fmtBytes(mem.total_bytes) +
-        " (" +
-        Number(mem.percent).toFixed(1) +
-        "%)";
-      setMeter("h-mem-meter", mem.percent);
-    } else {
-      document.getElementById("h-mem").textContent = "—";
-      setMeter("h-mem-meter", null);
-    }
-
-    if (mem.swap_total_bytes > 0) {
-      document.getElementById("h-swap").textContent =
-        fmtBytes(mem.swap_used_bytes) +
-        " / " +
-        fmtBytes(mem.swap_total_bytes) +
-        " (" +
-        Number(mem.swap_percent).toFixed(1) +
-        "%)";
-      setMeter("h-swap-meter", mem.swap_percent);
-    } else {
-      document.getElementById("h-swap").textContent = "none";
-      setMeter("h-swap-meter", null);
-    }
-
-    if (disk && disk.total_bytes) {
-      document.getElementById("h-disk").textContent =
-        fmtBytes(disk.used_bytes) +
-        " / " +
-        fmtBytes(disk.total_bytes) +
-        " (" +
-        Number(disk.percent).toFixed(1) +
-        "%)";
-      setMeter("h-disk-meter", disk.percent);
-    } else {
-      document.getElementById("h-disk").textContent = "—";
-      setMeter("h-disk-meter", null);
-    }
-
-    document.getElementById("h-uptime").textContent = fmtUptime(host.uptime_seconds);
-
-    var hostBits = [];
-    if (host.hostname) hostBits.push(host.hostname);
-    hostBits.push("live snapshot");
-    meta.textContent = hostBits.join(" · ");
-
-    var gpus = host.gpu || [];
+    var gpuEl = document.getElementById("host-gpu");
+    if (!gpuEl) return;
+    var gpus = (host && host.gpu) || [];
     if (!gpus.length) {
       gpuEl.hidden = true;
       gpuEl.innerHTML = "";
@@ -142,62 +135,22 @@
     }
     gpuEl.hidden = false;
     gpuEl.innerHTML =
-      '<h3 class="muted" style="margin:12px 0 8px;font-size:11px;text-transform:uppercase">GPU</h3>' +
-      '<div class="grid-stats">' +
+      '<p class="muted" style="margin:10px 0 0;font-size:12px">' +
       gpus
         .map(function (g, i) {
-          var util = g.utilization_percent;
-          var utilLabel =
-            util == null || util === "" ? "—" : Number(util).toFixed(0) + "%";
-          var memLabel = "—";
-          if (g.memory_total_bytes) {
-            memLabel =
-              fmtBytes(g.memory_used_bytes || 0) +
-              " / " +
-              fmtBytes(g.memory_total_bytes);
-          }
-          var temp =
-            g.temperature_c == null || g.temperature_c === ""
-              ? ""
-              : Number(g.temperature_c).toFixed(0) + "°C";
-          var title = api.esc(
-            (g.name || "GPU " + (i + 1)) + (g.vendor ? " · " + g.vendor : "")
-          );
-          var meterId = "h-gpu-meter-" + i;
-          var meterHtml =
-            util == null || util === ""
-              ? ""
-              : '<div class="meter" id="' +
-                meterId +
-                '"><div class="meter-fill" style="width:' +
-                Math.max(0, Math.min(100, Number(util))).toFixed(1) +
-                '%"></div></div>';
-          return (
-            '<div class="stat"><div class="k">' +
-            title +
-            '</div><div class="v">' +
-            utilLabel +
-            (temp ? " · " + temp : "") +
-            '</div><div class="muted" style="font-size:12px;margin-top:4px">' +
-            api.esc(memLabel) +
-            "</div>" +
-            meterHtml +
-            "</div>"
+          return api.esc(
+            (g.name || "GPU " + (i + 1)) +
+              (g.vendor ? " · " + g.vendor : "") +
+              (g.utilization_percent != null
+                ? " · now " + Number(g.utilization_percent).toFixed(0) + "%"
+                : "")
           );
         })
-        .join("") +
-      "</div>";
-    gpus.forEach(function (g, i) {
-      if (g.utilization_percent == null || g.utilization_percent === "") return;
-      var el = document.getElementById("h-gpu-meter-" + i);
-      if (!el) return;
-      var p = Number(g.utilization_percent);
-      el.classList.toggle("warn", p >= 75 && p < 90);
-      el.classList.toggle("bad", p >= 90);
-    });
+        .join(" · ") +
+      "</p>";
   }
 
-  function renderSpark(series, bucketSeconds) {
+  function renderSpark(series) {
     var el = document.getElementById("chart-splices");
     var byBucket = {};
     (series || []).forEach(function (row) {
@@ -265,10 +218,17 @@
       '<table class="data"><thead><tr><th>Channel</th><th>Splices</th><th>OK</th><th>Fail</th><th>Config</th><th></th></tr></thead><tbody>' +
       rows
         .map(function (r) {
+          var sw =
+            colors && r.id
+              ? colors.swatchHtml(r.id, r.name || "#" + r.id)
+              : "";
           return (
-            "<tr><td>" +
+            '<tr class="route-tinted" data-pid="' +
+            api.esc(r.id) +
+            '"><td><span class="route-chip">' +
+            sw +
             api.esc(r.name || "#" + r.id) +
-            "</td><td>" +
+            "</span></td><td>" +
             n(r.splices) +
             "</td><td>" +
             n(r.splice_ok) +
@@ -287,6 +247,9 @@
         })
         .join("") +
       "</tbody></table>";
+    el.querySelectorAll("tr.route-tinted").forEach(function (tr) {
+      if (colors) colors.paintRow(tr, tr.getAttribute("data-pid"));
+    });
     el.querySelectorAll(".btn-clear-channel").forEach(function (btn) {
       btn.addEventListener("click", function () {
         clearChannel(btn.getAttribute("data-id"), btn.getAttribute("data-name"));
@@ -337,25 +300,39 @@
       return;
     }
     el.innerHTML =
-      '<table class="data"><thead><tr><th>Egress</th><th></th><th>Processing</th></tr></thead><tbody>' +
+      '<table class="data"><thead><tr><th>Processing</th><th></th><th>Egress</th></tr></thead><tbody>' +
       routes
         .map(function (r) {
+          var sw = colors
+            ? colors.swatchHtml(r.processing_channel_id, r.processing_name)
+            : "";
           return (
-            "<tr><td>" +
-            api.esc(r.egress_name) +
-            '</td><td class="arrow">←</td><td>' +
+            '<tr class="route-tinted" data-pid="' +
+            api.esc(r.processing_channel_id) +
+            '"><td><span class="route-chip">' +
+            sw +
             api.esc(r.processing_name) +
+            '</span></td><td class="arrow">→</td><td>' +
+            api.esc(r.egress_name) +
             "</td></tr>"
           );
         })
         .join("") +
       "</tbody></table>";
+    el.querySelectorAll("tr.route-tinted").forEach(function (tr) {
+      if (colors) colors.paintRow(tr, tr.getAttribute("data-pid"));
+    });
   }
 
   function renderInventory(ch) {
     var el = document.getElementById("inventory");
     var proc = (ch && ch.processing) || [];
     var egr = (ch && ch.egress) || [];
+    var routes = (ch && ch.routes) || [];
+    var egrToProc = {};
+    routes.forEach(function (r) {
+      egrToProc[r.egress_channel_id] = r.processing_channel_id;
+    });
     el.innerHTML =
       '<div class="two-col">' +
       '<div><h3 class="muted" style="margin:0 0 8px;font-size:11px;text-transform:uppercase">Processing</h3>' +
@@ -363,10 +340,14 @@
         ? '<table class="data"><thead><tr><th>Name</th><th>Type</th><th>CC</th><th>On</th></tr></thead><tbody>' +
           proc
             .map(function (c) {
+              var sw = colors ? colors.swatchHtml(c.id, c.name) : "";
               return (
-                "<tr><td>" +
+                '<tr class="route-tinted" data-pid="' +
+                api.esc(c.id) +
+                '"><td><span class="route-chip">' +
+                sw +
                 api.esc(c.name) +
-                "</td><td>" +
+                "</span></td><td>" +
                 api.esc(c.input_type) +
                 "</td><td>" +
                 (c.caption_policy || (Number(c.captioning_enabled) ? "auto" : "off")) +
@@ -384,8 +365,12 @@
         ? '<table class="data"><thead><tr><th>Name</th><th>Type</th><th>Mode</th><th>On</th></tr></thead><tbody>' +
           egr
             .map(function (c) {
+              var pid = egrToProc[c.id];
               return (
-                "<tr><td>" +
+                '<tr class="route-tinted" data-pid="' +
+                api.esc(pid || "") +
+                '"><td>' +
+                (pid && colors ? colors.swatchHtml(pid) : "") +
                 api.esc(c.name) +
                 "</td><td>" +
                 api.esc(c.output_type) +
@@ -400,6 +385,10 @@
           "</tbody></table>"
         : '<div class="empty">None</div>') +
       "</div></div>";
+    el.querySelectorAll("tr.route-tinted").forEach(function (tr) {
+      var pid = tr.getAttribute("data-pid");
+      if (colors && pid) colors.paintRow(tr, pid);
+    });
   }
 
   async function load() {
@@ -422,8 +411,8 @@
     document.getElementById("m-routes").textContent = n(t.routing_changes);
     document.getElementById("m-config").textContent = n(t.config_changes);
     document.getElementById("m-life").textContent = n(t.lifecycle_events);
-    renderHost(d.host);
-    renderSpark(d.series, d.bucket_seconds);
+    renderHostCharts(d.host_series || [], d.host);
+    renderSpark(d.series);
     renderByChannel(d.by_channel);
     renderRoutes(d.channels && d.channels.routes);
     renderInventory(d.channels);
@@ -441,6 +430,9 @@
     });
   });
   document.getElementById("btn-refresh").addEventListener("click", load);
+  window.addEventListener("resize", function () {
+    load();
+  });
   load();
   setInterval(load, 30000);
 })();

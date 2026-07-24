@@ -43,6 +43,7 @@ log = logging.getLogger("nexbreak-egress")
 _stop = False
 _proc: Optional[Popen] = None
 _kill_requested = False
+_route_rebuild = False
 
 # stderr lines that mean the SRT session is dead but the process may still be alive
 _FATAL_MARKERS = (
@@ -197,7 +198,7 @@ def _build_argv(feed_host: str, feed_port: int, channel: dict[str, Any]) -> tupl
 
 
 def main() -> int:
-    global _proc, _stop, _kill_requested
+    global _proc, _stop, _kill_requested, _route_rebuild
 
     parser = argparse.ArgumentParser(description="NexBreak egress channel")
     parser.add_argument("--service-name", required=True)
@@ -303,6 +304,11 @@ def main() -> int:
                 "BUG: SRT URL missing peeridletimeout — wrong nexbreak_pipeline deployed?"
             )
         _proc = _spawn(argv)
+        route_key = (
+            int(source["id"]),
+            str(feed_host or ""),
+            int(feed_port),
+        )
 
         dest_detail = (
             f"hls /hls/{channel['service_name']}/index.m3u8"
@@ -325,35 +331,71 @@ def main() -> int:
         restart_at = 0.0
         backoff = 0.5
         while not _stop:
+            # Hot-apply routing: if Channels reassigns this egress, tear down
+            # the push and rebuild against the new local feed (~1s).
+            if _proc is not None and _proc.poll() is None:
+                try:
+                    src_now = _routed_source(conn, channel["id"])
+                    if src_now is None:
+                        log.warning("routing cleared — stopping push")
+                        _route_rebuild = True
+                        _kill(grace_s=0.5)
+                    else:
+                        key_now = (
+                            int(src_now["id"]),
+                            str(src_now.get("local_feed_host") or ""),
+                            int(src_now["local_feed_port"]),
+                        )
+                        if key_now != route_key:
+                            log.info(
+                                "routing changed %s → %s — rebuilding push",
+                                route_key,
+                                key_now,
+                            )
+                            _route_rebuild = True
+                            _kill(grace_s=0.5)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("routing watch: %s", exc)
+
             if _proc is not None and _proc.poll() is not None:
                 code = _proc.returncode
-                reason = "fault" if _kill_requested else f"exit-{code}"
+                was_route = _route_rebuild
+                _route_rebuild = False
+                reason = (
+                    "routing"
+                    if was_route
+                    else ("fault" if _kill_requested else f"exit-{code}")
+                )
                 now = time.time()
                 if now < restart_at:
                     time.sleep(0.1)
                     continue
-                log.warning(
-                    "%s recycled (%s code=%s) — restarting in %.1fs",
-                    engine,
-                    reason,
-                    code,
-                    backoff,
-                )
-                try:
-                    audit(
-                        conn,
-                        event_type="service_crash",
-                        egress_channel_id=channel["id"],
-                        result="failure",
-                        detail=f"{engine} {reason} code={code}; auto-restart",
+                if was_route:
+                    log.info("%s recycled (routing change) — restarting", engine)
+                    backoff = 0.5
+                else:
+                    log.warning(
+                        "%s recycled (%s code=%s) — restarting in %.1fs",
+                        engine,
+                        reason,
+                        code,
+                        backoff,
                     )
-                except Exception:
-                    pass
-                restart_at = now + backoff
-                time.sleep(backoff)
-                # Brief pause so SRT listen port is released.
-                time.sleep(0.2)
-                backoff = min(15.0, max(0.5, backoff * 1.4))
+                    try:
+                        audit(
+                            conn,
+                            event_type="service_crash",
+                            egress_channel_id=channel["id"],
+                            result="failure",
+                            detail=f"{engine} {reason} code={code}; auto-restart",
+                        )
+                    except Exception:
+                        pass
+                    restart_at = now + backoff
+                    time.sleep(backoff)
+                    # Brief pause so SRT listen port is released.
+                    time.sleep(0.2)
+                    backoff = min(15.0, max(0.5, backoff * 1.4))
                 if _stop:
                     break
                 # Drop the dead handle before rebuild — otherwise a failed
@@ -375,6 +417,11 @@ def main() -> int:
                     feed_host = source["local_feed_host"] or "127.0.0.1"
                     feed_port = int(source["local_feed_port"])
                     engine, argv = _build_argv(feed_host, feed_port, channel)
+                    route_key = (
+                        int(source["id"]),
+                        str(feed_host or ""),
+                        int(feed_port),
+                    )
                 except Exception as exc:  # noqa: BLE001
                     log.error("egress rebuild failed: %s — idling", exc)
                     try:

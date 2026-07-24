@@ -109,6 +109,48 @@ def require_bins(*names: str) -> dict[str, str]:
     return found
 
 
+def srt_latency_ms() -> int:
+    """Shared ingest/egress SRT latency (ms). Default 1200 — 800 was tight under LCE load."""
+    try:
+        return max(200, int(os.environ.get("NEXBREAK_SRT_LATENCY_MS", "1200")))
+    except ValueError:
+        return 1200
+
+
+def srt_rcvbuf_bytes() -> int:
+    """libsrt receive/send buffer (bytes). Larger buffers absorb national-path jitter + LCE stalls."""
+    try:
+        return max(65536, int(os.environ.get("NEXBREAK_SRT_RCVBUF", str(8 * 1024 * 1024))))
+    except ValueError:
+        return 8 * 1024 * 1024
+
+
+def srt_peeridle_ms() -> int:
+    try:
+        return max(1000, int(os.environ.get("NEXBREAK_SRT_PEERIDLE_MS", "10000")))
+    except ValueError:
+        return 10000
+
+
+def srt_url_common_query(*, peer_idle: bool = True) -> str:
+    """
+    Common libsrt query string for live MPEG-TS.
+
+    rcvbuf/sndbuf avoid 'No room to store incoming packet' under backpressure;
+    peeridletimeout tears down dead peers so callers can reconnect.
+    """
+    parts = [
+        f"latency={srt_latency_ms()}",
+        "transtype=live",
+        f"rcvbuf={srt_rcvbuf_bytes()}",
+        f"sndbuf={srt_rcvbuf_bytes()}",
+        "linger=0",
+    ]
+    if peer_idle:
+        parts.append(f"peeridletimeout={srt_peeridle_ms()}")
+    return "&".join(parts)
+
+
 def parse_srt_url(url: str) -> dict[str, Any]:
     """
     Parse srt://host:port[?mode=caller|listener|rendezvous] into fields.
@@ -172,20 +214,21 @@ def build_input_url(channel: dict[str, Any]) -> str:
                 host = host or parsed.get("srt_remote_host")
                 port = port or parsed.get("srt_remote_port")
                 listen = listen or parsed.get("srt_listen_port")
-        # Match egress default: 200ms is too tight and shows up as stutter.
-        latency_ms = int(os.environ.get("NEXBREAK_SRT_LATENCY_MS", "800"))
+        # Larger latency + rcvbuf than ultra-low defaults — national SRT + LCE
+        # backpressure previously overflowed libsrt (Space avail 0/8192).
+        q = srt_url_common_query(peer_idle=True)
         if mode == "listener":
             if not listen:
                 raise ValueError("srt_listen_port required for srt listener input")
-            return f"srt://0.0.0.0:{int(listen)}?mode=listener&latency={latency_ms}"
+            return f"srt://0.0.0.0:{int(listen)}?mode=listener&{q}"
         if not host or not port:
             raise ValueError(
                 "srt_remote_host/port required for srt caller/rendezvous input "
                 "(set them in Channels, or paste srt://host:port)"
             )
         if mode == "rendezvous":
-            return f"srt://{host}:{int(port)}?mode=rendezvous&latency={latency_ms}"
-        return f"srt://{host}:{int(port)}?mode=caller&latency={latency_ms}"
+            return f"srt://{host}:{int(port)}?mode=rendezvous&{q}"
+        return f"srt://{host}:{int(port)}?mode=caller&{q}"
     if kind == "decklink":
         idx = channel.get("decklink_device_index")
         if idx is None:
@@ -211,7 +254,7 @@ def ffmpeg_ingest_argv(channel: dict[str, Any], ffmpeg: str) -> list[str]:
     bitrate = int(channel.get("target_bitrate_kbps") or 14000)
     low_delay = _env_flag("NEXBREAK_INGEST_LOW_DELAY", False)
 
-    argv = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
+    argv = [ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostdin"]
 
     if kind == "rtsp":
         transport = (channel.get("rtsp_transport") or "tcp").lower()
@@ -319,7 +362,9 @@ def ffmpeg_preview_argv(
         "-probesize", "5000000",
         "-f", "mpegts",
         "-i", src,
-        "-map", "0:v:0",
+        # Optional maps: empty/wedged local feed must not hard-fail with
+        # "Stream map '0:v:0' matches no streams" every 30s (CPU thrash).
+        "-map", "0:v:0?",
         "-map", "0:a:0?",
         "-vf", f"scale={scale}",
         "-c:v", "libx264",
@@ -598,23 +643,20 @@ def build_srt_output_url(channel: dict[str, Any]) -> str:
     smooth; tlpktdrop is off so we don't intentionally discard for latency.
     """
     mode = channel.get("srt_mode") or "listener"
-    # ~800ms receive buffer — smooth for copy remux; still interactive for ops.
-    latency_ms = int(os.environ.get("NEXBREAK_SRT_LATENCY_MS", "800"))
-    common = f"latency={latency_ms}&transtype=live&linger=0"
-    # ~5s without peer → tear down so egress can recycle for the next client.
-    idle = "peeridletimeout=5000"
+    # Match ingest: latency + rcvbuf + peeridletimeout (egress recycles on idle).
+    common = srt_url_common_query(peer_idle=True)
     if mode == "listener":
         port = channel.get("srt_listen_port")
         if not port:
             raise ValueError("srt_listen_port required for SRT listener egress")
-        return f"srt://0.0.0.0:{int(port)}?mode=listener&{common}&{idle}"
+        return f"srt://0.0.0.0:{int(port)}?mode=listener&{common}"
     host = channel.get("srt_remote_host")
     port = channel.get("srt_remote_port")
     if not host or not port:
         raise ValueError("srt_remote_host/port required for SRT caller/rendezvous egress")
     if mode == "rendezvous":
-        return f"srt://{host}:{int(port)}?mode=rendezvous&{common}&{idle}"
-    return f"srt://{host}:{int(port)}?mode=caller&{common}&{idle}"
+        return f"srt://{host}:{int(port)}?mode=rendezvous&{common}"
+    return f"srt://{host}:{int(port)}?mode=caller&{common}"
 
 
 def hls_data_root() -> Path:
@@ -776,7 +818,7 @@ def tsp_egress_argv(
         )
 
     mode = (egress.get("srt_mode") or "listener").lower()
-    latency_ms = int(os.environ.get("NEXBREAK_SRT_LATENCY_MS", "800"))
+    latency_ms = srt_latency_ms()
     dest = resolve_local_feed_host(feed_host)
     argv = [
         tsp,
@@ -1106,6 +1148,58 @@ def read_bitrate_state(service_name: str) -> Optional[dict[str, Any]]:
         return data if isinstance(data, dict) else None
     except Exception:
         return None
+
+
+def probe_mpegts_has_video(
+    feed_host: str,
+    feed_port: int,
+    *,
+    timeout: float = 5.0,
+) -> bool:
+    """
+    True when the local MPEG-TS feed demuxes at least one video stream.
+    Used by proc health watchdog / preview backoff (empty feed ≠ MediaMTX fault).
+    """
+    import subprocess
+
+    ffprobe = which("ffprobe")
+    if not ffprobe:
+        return False
+    url = udp_mpegts_input_url(feed_host, int(feed_port), fifo_size=500000)
+    # Microseconds for ffmpeg udp timeout option.
+    to_us = max(500000, int(float(timeout) * 1_000_000))
+    argv = [
+        ffprobe,
+        "-v",
+        "error",
+        "-hide_banner",
+        "-timeout",
+        str(to_us),
+        "-analyzeduration",
+        "2000000",
+        "-probesize",
+        "1500000",
+        "-show_entries",
+        "stream=codec_type",
+        "-select_streams",
+        "v:0",
+        "-of",
+        "csv=p=0",
+        url,
+    ]
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            timeout=max(1.0, float(timeout) + 1.0),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if proc.returncode != 0:
+        return False
+    out = (proc.stdout or b"").decode("utf-8", errors="replace").strip().lower()
+    return "video" in out
 
 
 def probe_mpegts_bitrate_kbps(

@@ -24,7 +24,7 @@ Windows (selectable): **1 / 6 / 12 / 24 / 48 / 72** hours.
 | `versions/` | ffmpeg, tsp, mediamtx, python, php, apache, relevant dpkg, git describe |
 | `systemd/` | is-active/enabled, `systemctl status`, `systemctl cat` per unit |
 | `journal/` | `journalctl -u <unit> --since "<N> hours ago"` for all NexBreak units |
-| `config/` | processing / egress / routing / presets JSON, credential **metadata only**, caption library counts, audit events in window, schema.sql, apache/mediamtx configs |
+| `config/` | processing / egress / routing / presets JSON, credential **metadata only**, caption library counts, audit events in window, **host_metric_samples** JSON/CSV, schema.sql, apache/mediamtx configs |
 | `state/` | Small files from `/run/nexbreak` (splicemon, bitrate, …), SCTE dir listing |
 
 ### Always redacted / omitted

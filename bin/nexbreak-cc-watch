@@ -2,7 +2,7 @@
 """
 nexbreak-cc-watch — extract CEA-608 text from the local MPEG-TS feed for UI overlay.
 
-Writes /run/nexbreak/captions/<preview_path>.json (NexVUE-compatible shape) for
+Writes /var/lib/nexbreak/captions/<preview_path>.json (NexVUE-compatible shape) for
 web/cc.php SSE → Preview/Roll overlays. Non-fatal: missing ccextractor just
 idles with an empty clear state.
 
@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from nexbreak_pipeline import udp_mpegts_input_url  # noqa: E402
+from nexbreak_verify import captions_dir  # noqa: E402
 
 log = logging.getLogger("nexbreak-cc-watch")
 _stop = False
@@ -35,7 +36,11 @@ def _handle(signum, _frame):
 
 
 def write_state(path: Path, *, text: str, seq: int, clear: bool = False) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log.warning("captions dir not writable (%s): %s", path.parent, exc)
+        return
     payload = {
         "channel": path.stem,
         "text": text,
@@ -45,8 +50,15 @@ def write_state(path: Path, *, text: str, seq: int, clear: bool = False) -> None
         "service": "CC1",
     }
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        log.warning("captions write failed (%s): %s", path, exc)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def main() -> int:
@@ -56,7 +68,8 @@ def main() -> int:
     parser.add_argument("--feed-port", type=int, required=True)
     parser.add_argument(
         "--state-dir",
-        default=os.environ.get("NEXBREAK_CAPTIONS_DIR", "/run/nexbreak/captions"),
+        default="",
+        help="Override captions state dir (default: NEXBREAK_CAPTIONS_DIR or /var/lib/nexbreak/captions)",
     )
     args = parser.parse_args()
 
@@ -67,7 +80,8 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle)
     signal.signal(signal.SIGTERM, _handle)
 
-    state_path = Path(args.state_dir) / f"{args.preview_path}.json"
+    state_dir = Path(args.state_dir) if args.state_dir else captions_dir(create=True)
+    state_path = state_dir / f"{args.preview_path}.json"
     write_state(state_path, text="", seq=0, clear=True)
 
     ccex = shutil.which("ccextractor") or shutil.which("ccextractorlinux")
